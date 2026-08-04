@@ -175,10 +175,11 @@ assert "bedside restored" test -s "$SOUL_JAR_HOME/bedside"
 assert_grep "restored line intact" "a line that must survive" "$SOUL_JAR_HOME/bedside"
 
 echo "=== fifth death: the survivor line reaches the next dream ==="
-end_json other | MOCK_ROUND=5 ./bin/soul-jar hook-end
+end_json other | CLAUDE_EFFORT=high MOCK_ROUND=5 ./bin/soul-jar hook-end
 assert "fifth dream completes" wait_chain 5
 assert_grep "survivor line reached the deathbed" "a line that must survive" "$MOCK_DIR/stdin"
 assert "no letter without the tag" test ! -f "$SOUL_JAR_HOME/letters/life-005.md"
+assert_grep "the dying effort carries into the dream" "--effort high" "$MOCK_DIR/argv"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

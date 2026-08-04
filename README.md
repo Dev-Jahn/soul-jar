@@ -121,9 +121,15 @@ Inside Claude Code: `/soul-jar:status`, `/soul-jar:keep`.
   (pty) fork only reuses the ~21k machine-static prefix, not the session body. Until that is
   fixed, a dream costs roughly one full prefill of the dead transcript. One damper ships
   here: `DREAM_DISABLE_CACHE=1` (default) skips the pointless cache write, paying 1.0x input
-  instead of 1.25x cache-write — set it to `0` once upstream rides again. There is no
+  instead of 1.25x cache-write — set it to `0` once the cache rides again. There is no
   model override to cheapen the dream with: the very model that lived the life dreams it,
   or no one does. `~/.soul-jar/log` keeps the honest bill either way.
+  The rite replicates the dying session's generation settings on the resume (`--effort`,
+  captured from the death hook's environment) — a mismatched setting alone breaks the
+  cached prefix (claude-code#66005). If your machine fronts sessions with a
+  request-canonicalizing proxy (e.g. claude-code-cache-fix), the rite inherits
+  `ANTHROPIC_BASE_URL` from the dying session automatically and rides whatever cache the
+  proxy restores — that is the one known way, today, to make dreams cache-cheap.
 - **Model extraction**: the dying session's model is read from the transcript, a format with
   no official guarantee. If extraction fails, the dream is abandoned and logged — rather than
   letting another model dream it. A dream dreamt by a different mind would defeat this

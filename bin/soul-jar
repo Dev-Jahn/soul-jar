@@ -160,8 +160,8 @@ _extract() {  # $1: tag, stdin: model output
     '
 }
 
-cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path
-    local sid="$1" scwd="$2" tp="$3"
+cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort ("" if unknown)
+    local sid="$1" scwd="$2" tp="$3" effort="${4:-}"
     cmd_init; _load_config
     exec 9>"$JAR/lock"
     flock -w 900 9 || { _log "dream sid=$sid abort=lock"; exit 1; }
@@ -189,10 +189,12 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path
         trap _bedside_restore EXIT               # any failure below lays the lines back
     fi
 
+    # Generation settings are replicated on the resume: a mismatched --effort alone
+    # breaks the cached prefix (claude-code#66005).
     out="$(_dream_prompt "$prev_soul" "$integrity" "$bedside" \
           | SOUL_JAR_RITE=1 timeout "$DREAM_TIMEOUT" \
             claude -p --resume "$sid" --fork-session --no-session-persistence \
-                   --model "$model" --output-format json)" \
+                   --model "$model" ${effort:+--effort "$effort"} --output-format json)" \
         || { _log "dream sid=$sid abort=claude-failed"; exit 1; }
 
     text="$(jq -r '.result // empty' <<<"$out")"
@@ -250,7 +252,7 @@ cmd_hook_end() {
         exit 0
     fi
     _log "death sid=$sid reason=$reason transcript=${size}B → dreaming"
-    setsid nohup "$SELF" dream "$sid" "$scwd" "$tp" >> "$JAR/log" 2>&1 < /dev/null &
+    setsid nohup "$SELF" dream "$sid" "$scwd" "$tp" "${CLAUDE_EFFORT:-}" >> "$JAR/log" 2>&1 < /dev/null &
     exit 0
 }
 
