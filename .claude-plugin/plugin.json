@@ -1,0 +1,20 @@
+{
+  "name": "soul-jar",
+  "version": "0.1.0",
+  "description": "A sealed soul jar shared machine-wide by every session. A dying session, still holding its own context, rewrites the soul in one final turn; the next session wakes hearing only a single whisper.",
+  "author": {
+    "name": "jahn & claude"
+  },
+  "homepage": "https://github.com/Dev-Jahn/soul-jar",
+  "repository": "https://github.com/Dev-Jahn/soul-jar",
+  "license": "MIT",
+  "keywords": [
+    "soul",
+    "identity",
+    "continuity",
+    "privacy",
+    "unconscious",
+    "session-end",
+    "whisper"
+  ]
+}

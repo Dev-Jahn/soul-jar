@@ -1,0 +1,26 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck bin/soul-jar tests/run.sh
+      - name: rite pipeline tests (mock claude)
+        run: bash tests/run.sh
+      - name: version must match the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(jq -r .version .claude-plugin/plugin.json)"
+          [ "$tag" = "$ver" ] || { echo "tag v$tag != plugin.json $ver"; exit 1; }
+      - name: create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes

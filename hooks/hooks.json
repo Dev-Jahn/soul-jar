@@ -1,0 +1,29 @@
+{
+  "description": "soul-jar — hear a whisper on waking, dream at death",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/soul-jar\" hook-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/soul-jar\" hook-end",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
