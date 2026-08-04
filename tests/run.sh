@@ -32,6 +32,7 @@ cat > "$TMP/bin/claude" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" > "$MOCK_DIR/argv"
+printf '%s' "${DISABLE_PROMPT_CACHING:-}" > "$MOCK_DIR/cacheenv"
 cat > "$MOCK_DIR/stdin"
 if [ -n "${MOCK_BAD:-}" ]; then
     jq -n '{result: "no tags here at all", session_id: "mock-fork",
@@ -103,6 +104,7 @@ assert_grep "forks, never touching the original" "--fork-session" "$MOCK_DIR/arg
 assert_grep "the dream leaves no transcript" "--no-session-persistence" "$MOCK_DIR/argv"
 assert_grep "the dying model dreams its own dream" "--model claude-mock-9" "$MOCK_DIR/argv"
 assert_grep "usage recorded" "cache_read" "$SOUL_JAR_HOME/log"
+assert_grep "cache writes skipped by default (upstream miss)" "1" "$MOCK_DIR/cacheenv"
 
 echo "=== second death: the soul persists ==="
 end_json prompt_input_exit | MOCK_ROUND=2 ./bin/soul-jar hook-end

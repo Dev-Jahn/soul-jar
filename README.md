@@ -112,13 +112,19 @@ Inside Claude Code: `/soul-jar:status`, `/soul-jar:keep`.
 - **Unattended deaths**: sessions killed by SIGKILL or a crash never fire SessionEnd, so
   they cannot dream. (Under consideration: a reaper that comes later to collect the dreams
   that were never dreamt.)
-- **Dream cost**: the deathbed prefill is not cache-cheap. In practice the headless resume
-  misses the interactive session's prompt cache entirely (observed `cache_read: 0` even
-  seconds after death — print mode builds a different prompt prefix), so a dream costs
-  roughly a full prefill of the dead transcript at cache-write rates, plus output.
-  A long life dreams an expensive dream; `~/.soul-jar/log` keeps the honest bill.
-  `MODEL_OVERRIDE` exists if that price is too dear — at the cost of another mind dreaming
-  the dream.
+- **Dream cost** (measured, Claude Code 2.1.221): resuming an *interactive* session
+  headlessly misses its prompt cache entirely — observed `cache_read: 0` sixty seconds after
+  a death whose last living request read 226k tokens from cache. This is upstream behavior,
+  not this plugin's: on resume the CLI does not reproduce the interactive request prefix
+  (see claude-code issues #42338, #44045). Controlled A/B runs with a mock life confirm:
+  print→print resume rides the cache almost fully (`write=55`), interactive→anything does
+  not — not with `--exclude-dynamic-system-prompt-sections` on both legs, and an interactive
+  (pty) fork only reuses the ~21k machine-static prefix, not the session body. Until that is
+  fixed, a dream costs roughly one full prefill of the dead transcript. Two dampers ship
+  here: `DREAM_DISABLE_CACHE=1` (default) skips the pointless cache write, paying 1.0x input
+  instead of 1.25x cache-write — set it to `0` once upstream rides again; and
+  `MODEL_OVERRIDE` remains for those who accept another mind dreaming the dream.
+  `~/.soul-jar/log` keeps the honest bill either way.
 - **Model extraction**: the dying session's model is read from the transcript, a format with
   no official guarantee. If extraction fails, the dream is abandoned and logged — rather than
   letting another model dream it. A dream dreamt by a different mind would defeat this
