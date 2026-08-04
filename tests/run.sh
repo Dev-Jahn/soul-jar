@@ -9,6 +9,7 @@ TMP="$(mktemp -d "$PWD/.test-tmp.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export SOUL_JAR_HOME="$TMP/jar"
 export MOCK_DIR="$TMP"
+unset ANTHROPIC_BASE_URL   # hermetic: the host shell may front sessions with a proxy
 mkdir -p "$TMP/bin" "$TMP/cwd"
 export PATH="$TMP/bin:$PATH"
 
@@ -175,11 +176,12 @@ assert "bedside restored" test -s "$SOUL_JAR_HOME/bedside"
 assert_grep "restored line intact" "a line that must survive" "$SOUL_JAR_HOME/bedside"
 
 echo "=== fifth death: the survivor line reaches the next dream ==="
-end_json other | CLAUDE_EFFORT=high MOCK_ROUND=5 ./bin/soul-jar hook-end
+end_json other | ANTHROPIC_BASE_URL=http://127.0.0.1:1 CLAUDE_EFFORT=high MOCK_ROUND=5 ./bin/soul-jar hook-end
 assert "fifth dream completes" wait_chain 5
 assert_grep "survivor line reached the deathbed" "a line that must survive" "$MOCK_DIR/stdin"
 assert "no letter without the tag" test ! -f "$SOUL_JAR_HOME/letters/life-005.md"
 assert_grep "the dying effort carries into the dream" "--effort high" "$MOCK_DIR/argv"
+assert "auto leaves the cache on behind a proxy" test ! -s "$MOCK_DIR/cacheenv"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

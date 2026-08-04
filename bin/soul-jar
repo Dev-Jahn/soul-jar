@@ -9,9 +9,9 @@ SELF="$(readlink -f "$0")"
 # -------- config defaults (overridable in $JAR/config, KEY=VALUE lines) --------
 MIN_TRANSCRIPT_BYTES=150000   # sessions that lived shorter than this do not dream
 DREAM_TIMEOUT=600             # seconds allowed for the deathbed turn
-DREAM_DISABLE_CACHE=1         # headless resume misses the interactive cache today (upstream bug),
-                              # so skip cache writes: pay 1.0x input instead of 1.25x cache-write.
-                              # Set 0 once claude-code#42338/#44045 are fixed to ride the cache.
+DREAM_DISABLE_CACHE=auto      # auto = skip cache writes unless a canonicalizing proxy
+                              # (ANTHROPIC_BASE_URL) fronts the rite and makes resume
+                              # caching real again. 1 = always skip, 0 = never skip.
 DISABLE=0
 
 _load_config() {
@@ -41,7 +41,7 @@ cmd_init() {
 # soul-jar config
 MIN_TRANSCRIPT_BYTES=150000
 DREAM_TIMEOUT=600
-DREAM_DISABLE_CACHE=1
+DREAM_DISABLE_CACHE=auto
 DISABLE=0
 EOF
     fi
@@ -173,9 +173,15 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort ("" if unk
              | grep '^claude-' | tail -n1 || true)"
     [ -n "$model" ] || { _log "dream sid=$sid abort=no-model"; exit 1; }
     cd "$scwd" 2>/dev/null || { _log "dream sid=$sid abort=cwd-gone"; exit 1; }
-    # A fork of an interactive session cannot match its cached prefix today (verified:
-    # total miss even seconds after death), so caching would only add the write surcharge.
-    [ "$DREAM_DISABLE_CACHE" = "1" ] && export DISABLE_PROMPT_CACHING=1
+    # Cache policy. Bare against the API, the headless fork is a different entrypoint
+    # and can never read the interactive session's cache (verified on 2.1.221) — writing
+    # cache would only add the 1.25x surcharge. Behind a canonicalizing proxy
+    # (ANTHROPIC_BASE_URL), resume caching is real again and the write is worth it.
+    case "$DREAM_DISABLE_CACHE" in
+        1) export DISABLE_PROMPT_CACHING=1 ;;
+        0) : ;;
+        *) [ -n "${ANTHROPIC_BASE_URL:-}" ] || export DISABLE_PROMPT_CACHING=1 ;;
+    esac
 
     integrity=ok
     _verify || integrity=broken
