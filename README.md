@@ -136,3 +136,6 @@ Inside Claude Code: `/soul-jar:status`, `/soul-jar:keep`.
 
 - reaper: a cron that finds the transcripts of unattended deaths and performs the rite belatedly
 - PreCompact: a short dream just before compaction — partial forgetting deserves partial rites
+- deferred dreams: let a death lie in state and dream in the quiet hours; transcripts keep, the
+  cache is lost either way, and quota windows are emptiest at night. The queue is easy — owning
+  a scheduler is not, so this waits until the need is real.
