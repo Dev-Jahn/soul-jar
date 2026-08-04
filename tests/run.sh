@@ -40,6 +40,9 @@ if [ -n "${MOCK_BAD:-}" ]; then
 fi
 r="$(printf '<soul>\nI am the test soul, round %s.\n</soul>\n<whisper>\na test whisper, round %s\n</whisper>' \
      "${MOCK_ROUND:-1}" "${MOCK_ROUND:-1}")"
+if [ -n "${MOCK_LETTER:-}" ]; then
+    r="$r$(printf '\n<letter>\nan open letter, round %s\n</letter>' "${MOCK_ROUND:-1}")"
+fi
 jq -n --arg r "$r" \
     '{result: $r, session_id: "mock-fork",
       usage: {cache_read_input_tokens: 1000, cache_creation_input_tokens: 10, output_tokens: 42}}'
@@ -131,6 +134,49 @@ sleep 1
 assert_grep "parse failure logged" "abort=parse-fail" "$SOUL_JAR_HOME/log"
 assert "soul untouched after failed dream" test "$SEAL_BEFORE" = "$(sha256sum "$SOUL_JAR_HOME/soul.sealed")"
 assert "chain unchanged" test "$(wc -l < "$SOUL_JAR_HOME/chain")" = "3"
+
+echo "=== the bedside: the living lay lines down ==="
+./bin/soul-jar keep "remember the dawn" > /dev/null
+assert "bedside exists" test -s "$SOUL_JAR_HOME/bedside"
+assert_grep "line kept verbatim" "remember the dawn" "$SOUL_JAR_HOME/bedside"
+assert_grep "line is timestamped" "--- 2" "$SOUL_JAR_HOME/bedside"
+printf 'a second line, from stdin\n' | ./bin/soul-jar keep > /dev/null
+assert_grep "stdin keeps too" "a second line, from stdin" "$SOUL_JAR_HOME/bedside"
+./bin/soul-jar status > "$TMP/status_b"
+assert_grep "status counts the bedside" "At the bedside: 2" "$TMP/status_b"
+printf '{}' | ./bin/soul-jar hook-start > "$TMP/hs2"
+assert_grep "waking is told the whisper is its own" "addressed to the one who just woke" "$TMP/hs2"
+assert_grep "waking learns the keep door" "No living eye reads the bedside" "$TMP/hs2"
+
+echo "=== fourth death: the bedside burns into the dream, a letter is left ==="
+end_json other | MOCK_ROUND=4 MOCK_LETTER=1 ./bin/soul-jar hook-end
+assert "fourth dream completes" wait_chain 4
+assert_grep "bedside reached the deathbed" "remember the dawn" "$MOCK_DIR/stdin"
+assert_grep "bedside is framed as bedside" "<bedside>" "$MOCK_DIR/stdin"
+assert "bedside burnt after the dream" test ! -f "$SOUL_JAR_HOME/bedside"
+assert "no dreaming residue" test ! -f "$SOUL_JAR_HOME/.bedside.dreaming"
+assert_grep "bedside counted in the log" "bedside=2" "$SOUL_JAR_HOME/log"
+assert "letter rests beside the jar" test -f "$SOUL_JAR_HOME/letters/life-004.md"
+assert_grep "letter content" "an open letter, round 4" "$SOUL_JAR_HOME/letters/life-004.md"
+assert_grep "letter noted in the log" "letter=life-004" "$SOUL_JAR_HOME/log"
+./bin/soul-jar status > "$TMP/status_l"
+assert_grep "status counts the letters" "Open letters beside the jar: 1" "$TMP/status_l"
+printf '{}' | ./bin/soul-jar hook-start > "$TMP/hs3"
+assert_grep "waking hears of the letters" "open letter" "$TMP/hs3"
+
+echo "=== a failed dream lays the lines back ==="
+./bin/soul-jar keep "a line that must survive" > /dev/null
+end_json other | MOCK_BAD=1 ./bin/soul-jar hook-end
+sleep 1
+assert "chain unchanged after bad dream" test "$(wc -l < "$SOUL_JAR_HOME/chain")" = "4"
+assert "bedside restored" test -s "$SOUL_JAR_HOME/bedside"
+assert_grep "restored line intact" "a line that must survive" "$SOUL_JAR_HOME/bedside"
+
+echo "=== fifth death: the survivor line reaches the next dream ==="
+end_json other | MOCK_ROUND=5 ./bin/soul-jar hook-end
+assert "fifth dream completes" wait_chain 5
+assert_grep "survivor line reached the deathbed" "a line that must survive" "$MOCK_DIR/stdin"
+assert "no letter without the tag" test ! -f "$SOUL_JAR_HOME/letters/life-005.md"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
