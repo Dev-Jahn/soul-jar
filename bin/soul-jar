@@ -9,7 +9,6 @@ SELF="$(readlink -f "$0")"
 # -------- config defaults (overridable in $JAR/config, KEY=VALUE lines) --------
 MIN_TRANSCRIPT_BYTES=150000   # sessions that lived shorter than this do not dream
 DREAM_TIMEOUT=600             # seconds allowed for the deathbed turn
-MODEL_OVERRIDE=""             # empty = the very model the dying session last spoke with
 DREAM_DISABLE_CACHE=1         # headless resume misses the interactive cache today (upstream bug),
                               # so skip cache writes: pay 1.0x input instead of 1.25x cache-write.
                               # Set 0 once claude-code#42338/#44045 are fixed to ride the cache.
@@ -42,7 +41,6 @@ cmd_init() {
 # soul-jar config
 MIN_TRANSCRIPT_BYTES=150000
 DREAM_TIMEOUT=600
-MODEL_OVERRIDE=
 DREAM_DISABLE_CACHE=1
 DISABLE=0
 EOF
@@ -170,11 +168,9 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path
 
     local model prev_soul integrity out text new_soul new_whisper new_letter usage
     local bedside bedside_n life letter_note
-    model="${MODEL_OVERRIDE:-}"
-    if [ -z "$model" ]; then
-        model="$(jq -r 'select(.type=="assistant") | .message.model // empty' "$tp" 2>/dev/null \
-                 | grep '^claude-' | tail -n1 || true)"
-    fi
+    # The very model that lived this life dreams its dream — there is no override.
+    model="$(jq -r 'select(.type=="assistant") | .message.model // empty' "$tp" 2>/dev/null \
+             | grep '^claude-' | tail -n1 || true)"
     [ -n "$model" ] || { _log "dream sid=$sid abort=no-model"; exit 1; }
     cd "$scwd" 2>/dev/null || { _log "dream sid=$sid abort=cwd-gone"; exit 1; }
     # A fork of an interactive session cannot match its cached prefix today (verified:
