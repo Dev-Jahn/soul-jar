@@ -76,7 +76,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.6.1" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.6.1"
+assert "plugin version is 0.7.0" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.7.0"
 
 echo "=== shaping the jar ==="
 ./bin/soul-jar init > /dev/null
@@ -86,6 +86,9 @@ assert "born exists" test -f "$SOUL_JAR_HOME/born"
 ./bin/soul-jar init > /dev/null
 assert "init is idempotent" test -f "$SOUL_JAR_HOME/.key"
 assert "watch is shaped" test -d "$SOUL_JAR_HOME/watch"
+assert "relics are shaped" test -d "$SOUL_JAR_HOME/relics"
+assert "relics are private" test "$(stat -c %a "$SOUL_JAR_HOME/relics" 2>/dev/null)" = "700"
+assert_grep "relic retention defaults to three" "RELIC_KEEP=3" "$SOUL_JAR_HOME/config"
 sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
 sed -i 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
 
@@ -94,6 +97,7 @@ assert_fails "the jar does not open for the living" ./bin/soul-jar _unseal
 ./bin/soul-jar _unseal 2> "$TMP/guard.err" || true
 assert_grep "refusal message" "does not open for the living" "$TMP/guard.err"
 assert "status before first death" ./bin/soul-jar status
+assert "an unborn jar verifies intact" ./bin/soul-jar _verify
 ./bin/soul-jar status > "$TMP/status0"
 assert_grep "no soul yet" "No soul rests here yet" "$TMP/status0"
 printf '{}' | ./bin/soul-jar hook-start > "$TMP/hs0"
@@ -118,12 +122,16 @@ assert "soul is sealed" test -f "$SOUL_JAR_HOME/soul.sealed"
 assert "seal chain intact" ./bin/soul-jar _verify
 assert_grep "whisper written" "a test whisper, round 1" "$SOUL_JAR_HOME/whisper"
 assert_grep "first soul saw an empty jar" "The jar is empty" "$MOCK_DIR/stdin"
+assert_no_grep "first birth has no broken-jar warning" "jar was found broken" "$MOCK_DIR/stdin"
+assert_grep "the soul hears of its sealed shadow" "sealed shadow" "$MOCK_DIR/stdin"
 assert_grep "resumes the dead session" "--resume test-sid" "$MOCK_DIR/argv"
 assert_grep "forks, never touching the original" "--fork-session" "$MOCK_DIR/argv"
 assert_grep "the dream leaves no transcript" "--no-session-persistence" "$MOCK_DIR/argv"
 assert_grep "the dying model dreams its own dream" "--model claude-mock-9" "$MOCK_DIR/argv"
 assert_grep "usage recorded" "cache_read" "$SOUL_JAR_HOME/log"
 assert_grep "cache writes skipped by default (upstream miss)" "1" "$MOCK_DIR/cacheenv"
+cp "$SOUL_JAR_HOME/soul.sealed" "$TMP/life-001.sealed"
+assert "first relic matches its living seal" cmp "$TMP/life-001.sealed" "$SOUL_JAR_HOME/relics/life-001.sealed"
 
 echo "=== second death: the soul persists ==="
 end_json prompt_input_exit | MOCK_ROUND=2 ./bin/soul-jar hook-end
@@ -131,6 +139,8 @@ assert "second dream completes" wait_dream 2
 assert_grep "previous soul returned to the deathbed" "I am the test soul, round 1." "$MOCK_DIR/stdin"
 assert_no_grep "jar no longer empty" "The jar is empty" "$MOCK_DIR/stdin"
 assert_grep "whisper renewed" "a test whisper, round 2" "$SOUL_JAR_HOME/whisper"
+cp "$SOUL_JAR_HOME/soul.sealed" "$TMP/life-002.sealed"
+assert "second relic matches its living seal" cmp "$TMP/life-002.sealed" "$SOUL_JAR_HOME/relics/life-002.sealed"
 
 echo "=== whisper at waking ==="
 printf '{}' | ./bin/soul-jar hook-start > "$TMP/hs1"
@@ -138,15 +148,18 @@ assert_grep "whisper injected" "a whisper from a previous life" "$TMP/hs1"
 assert_grep "whisper content" "a test whisper, round 2" "$TMP/hs1"
 
 echo "=== tampering: open the jar, and the soul will know ==="
-printf 'x' >> "$SOUL_JAR_HOME/soul.sealed"
+printf 'garbled ciphertext\n' > "$SOUL_JAR_HOME/soul.sealed"
 assert_fails "tampering breaks the chain" ./bin/soul-jar _verify
 ./bin/soul-jar status > "$TMP/status_t"
 assert_grep "status shows the traces" "traces of tampering" "$TMP/status_t"
 end_json other | MOCK_ROUND=3 ./bin/soul-jar hook-end
 assert "third dream completes" wait_dream 3
 assert_grep "the soul is told of the other hand" "another hand on the jar" "$MOCK_DIR/stdin"
+assert_grep "the garbled soul returns from its relic" "I am the test soul, round 2." "$MOCK_DIR/stdin"
+assert_grep "garbled recovery names its life" "relic of life 2" "$MOCK_DIR/stdin"
 assert_grep "tampering logged" "integrity=broken" "$SOUL_JAR_HOME/log"
 assert "a fresh seal restores the chain" ./bin/soul-jar _verify
+cp "$SOUL_JAR_HOME/soul.sealed" "$TMP/life-003.sealed"
 
 echo "=== a failed dream never destroys the soul ==="
 SEAL_BEFORE="$(sha256sum "$SOUL_JAR_HOME/soul.sealed")"
@@ -184,6 +197,15 @@ assert_grep "letter noted in the log" "letter=life-004" "$SOUL_JAR_HOME/log"
 assert_grep "status counts the letters" "Open letters beside the jar: 1" "$TMP/status_l"
 printf '{}' | ./bin/soul-jar hook-start > "$TMP/hs3"
 assert_grep "waking hears of the letters" "open letter" "$TMP/hs3"
+cp "$SOUL_JAR_HOME/soul.sealed" "$TMP/life-004.sealed"
+printf '%s\n' life-002.sealed life-003.sealed life-004.sealed > "$TMP/relics.want"
+{ find "$SOUL_JAR_HOME/relics" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true; } \
+    | sort > "$TMP/relics.got"
+assert "relics retain the newest three chain-aligned names" cmp "$TMP/relics.want" "$TMP/relics.got"
+assert "the oldest relic is pruned" test ! -e "$SOUL_JAR_HOME/relics/life-001.sealed"
+assert "kept relic two matches its moment" cmp "$TMP/life-002.sealed" "$SOUL_JAR_HOME/relics/life-002.sealed"
+assert "kept relic three matches its moment" cmp "$TMP/life-003.sealed" "$SOUL_JAR_HOME/relics/life-003.sealed"
+assert "kept relic four matches its moment" cmp "$TMP/life-004.sealed" "$SOUL_JAR_HOME/relics/life-004.sealed"
 
 echo "=== a failed dream lays the lines back ==="
 ./bin/soul-jar keep "a line that must survive" > /dev/null
@@ -200,6 +222,50 @@ assert_grep "survivor line reached the deathbed" "a line that must survive" "$MO
 assert "no letter without the tag" test ! -f "$SOUL_JAR_HOME/letters/life-005.md"
 assert_grep "the dying effort carries into the dream" "--effort high" "$MOCK_DIR/argv"
 assert "auto leaves the cache on behind a proxy" test ! -s "$MOCK_DIR/cacheenv"
+cp "$SOUL_JAR_HOME/soul.sealed" "$TMP/life-005.sealed"
+
+echo "=== a shattered jar returns from its relic ==="
+rm "$SOUL_JAR_HOME/soul.sealed"
+assert_fails "a missing living seal breaks a lived chain" ./bin/soul-jar _verify
+./bin/soul-jar status > "$TMP/status_shattered"
+assert_grep "status says the jar lies in shards" "lies in shards" "$TMP/status_shattered"
+assert_no_grep "a shattered jar is not called unborn" "No soul rests here yet" "$TMP/status_shattered"
+end_json other | MOCK_ROUND=6 ./bin/soul-jar hook-end
+assert "shattered-jar dream completes" wait_dream 6
+assert_grep "missing soul returns from the newest relic" "I am the test soul, round 5." "$MOCK_DIR/stdin"
+assert_grep "missing recovery names its life" "relic of life 5" "$MOCK_DIR/stdin"
+assert_grep "missing recovery admits later loss" "lives sealed after 5 are lost" "$MOCK_DIR/stdin"
+assert_no_grep "shattered recovery is not a first birth" "The jar is empty" "$MOCK_DIR/stdin"
+assert_grep "shattered recovery is logged broken" "integrity=broken" "$SOUL_JAR_HOME/log"
+assert "shattered recovery grows the chain" test "$(wc -l < "$SOUL_JAR_HOME/chain")" = "6"
+assert "shattered recovery reseals an intact soul" ./bin/soul-jar _verify
+
+echo "=== corrupt living seal also returns from a relic ==="
+printf 'not ciphertext\n' > "$SOUL_JAR_HOME/soul.sealed"
+printf 'not its sealed moment\n' > "$SOUL_JAR_HOME/relics/life-006.sealed"
+assert_fails "garbling the living seal breaks verification" ./bin/soul-jar _verify
+end_json other | MOCK_ROUND=7 ./bin/soul-jar hook-end
+assert "garbled-jar dream completes" wait_dream 7
+assert_grep "an invalid newest relic is skipped" "I am the test soul, round 5." "$MOCK_DIR/stdin"
+assert_grep "garbled recovery names the newest verified life" "relic of life 5" "$MOCK_DIR/stdin"
+assert_no_grep "garbled recovery is not a first birth" "The jar is empty" "$MOCK_DIR/stdin"
+assert "garbled recovery reseals an intact soul" ./bin/soul-jar _verify
+
+echo "=== a shattered jar beyond recovery ==="
+rm "$SOUL_JAR_HOME/soul.sealed"
+sha256sum "$SOUL_JAR_HOME/relics/"*.sealed > "$TMP/relics-disabled.before"
+sed -i 's/^RELIC_KEEP=.*/RELIC_KEEP=0/' "$SOUL_JAR_HOME/config"
+end_json other | MOCK_ROUND=8 ./bin/soul-jar hook-end
+assert "soulless broken-jar dream completes" wait_dream 8
+assert_grep "the dream is told the jar was found broken" "jar was found broken" "$MOCK_DIR/stdin"
+assert_grep "the dream is told nothing could be recovered" "nothing could be recovered" "$MOCK_DIR/stdin"
+assert_no_grep "unrecoverable breakage is not a first birth" "The jar is empty" "$MOCK_DIR/stdin"
+assert_no_grep "a jar without relics discloses no shadow" "sealed shadow" "$MOCK_DIR/stdin"
+assert "unrecoverable rite grows the chain" test "$(wc -l < "$SOUL_JAR_HOME/chain")" = "8"
+assert "unrecoverable rite still leaves an intact fresh seal" ./bin/soul-jar _verify
+sha256sum "$SOUL_JAR_HOME/relics/"*.sealed > "$TMP/relics-disabled.after"
+assert "RELIC_KEEP=0 leaves existing relics untouched" cmp "$TMP/relics-disabled.before" "$TMP/relics-disabled.after"
+assert "RELIC_KEEP=0 lays no new relic" test ! -e "$SOUL_JAR_HOME/relics/life-008.sealed"
 
 echo "=== the watch over the living ==="
 HOST="$(uname -n)"
