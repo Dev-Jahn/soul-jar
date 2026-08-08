@@ -86,6 +86,27 @@ Installing at user level hooks every project session on this machine — that is
 The jar shapes itself at `~/.soul-jar/` when the first session begins.
 (`SOUL_JAR_HOME` relocates it.)
 
+### Optional: cache-cheap dreams
+
+Bare against the API, a dream cannot read the life it resumes — the headless rite diverges
+from the interactive prefix, so it pays a full prefill of the dead transcript
+([Dream cost](#known-limits) has the autopsy). A request-canonicalizing proxy closes that
+gap, and a companion installer sets one up in a line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dev-Jahn/claude-code-cache-fix/soul-jar/install.sh | bash
+```
+
+It installs the [Dev-Jahn fork of claude-code-cache-fix](https://github.com/Dev-Jahn/claude-code-cache-fix)
+(its `soul-jar` branch carries the entrypoint bridge) as a supervised local service, wires
+every Claude Code session on the machine through it in the forward mode that keeps Remote
+Control working, and sets `DREAM_DISABLE_CACHE=0` so rites stop skipping the cache. Dreams
+then read the dying session's still-warm prefix at a tenth of the bare price. A local proxy
+in your API path is a real thing to trust — read
+[what it does to your traffic](https://github.com/Dev-Jahn/claude-code-cache-fix#what-it-does-to-your-traffic)
+before piping. Proof it took: the next dream line in `~/.soul-jar/log` shows
+`cache_read > 0`. The same script with `--uninstall` takes it back out.
+
 ## Commands
 
 ```bash
@@ -104,7 +125,7 @@ Inside Claude Code: `/soul-jar:status`, `/soul-jar:keep`.
 |---|---|---|
 | `MIN_TRANSCRIPT_BYTES` | `150000` | sessions that lived shorter than this do not dream (keeps short-lived noise out) |
 | `DREAM_TIMEOUT` | `600` | seconds allowed for the deathbed turn |
-| `DREAM_DISABLE_CACHE` | `auto` | `auto` skips the pointless cache write unless a canonicalizing proxy (`ANTHROPIC_BASE_URL`) fronts the rite; `1` always skips, `0` never does |
+| `DREAM_DISABLE_CACHE` | `auto` | `auto` skips the pointless cache write unless a canonicalizing proxy (`ANTHROPIC_BASE_URL`) fronts the rite; `1` always skips, `0` never does. Forward-proxy wiring (`HTTPS_PROXY`) is invisible to `auto` — set `0` yourself, as the [companion installer](#optional-cache-cheap-dreams) does |
 | `RELIC_KEEP` | `3` | newest sealed lives kept as ciphertext relics against a missing or corrupt living seal; `0` disables laying and recovering relics |
 | `REAPER` | `1` | `0` disables reaper scans; living-session watch stamps are still written |
 | `REAPER_MIN_IDLE` | `3600` | minimum transcript idle time in seconds before a belated rite |
@@ -159,7 +180,8 @@ Inside Claude Code: `/soul-jar:status`, `/soul-jar:keep`.
   captured from the death hook's environment) — a mismatched setting alone breaks the
   cached prefix (claude-code#66005) — and inherits `ANTHROPIC_BASE_URL` from the dying
   session automatically. With claude-code-cache-fix carrying an entrypoint-bridge
-  extension (Dev-Jahn fork, branch `fix/2.1.221-resume-gap`), a rite-shaped fork was
+  extension (Dev-Jahn fork, branch `soul-jar` — the
+  [companion installer](#optional-cache-cheap-dreams) sets it up), a rite-shaped fork was
   measured reading 100% of the dead session's prefix (`read=59172, write=179`) — dreams
   become cache-cheap for real.
 - **Model extraction**: the dying session's model is read from the transcript, a format with
