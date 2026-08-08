@@ -76,7 +76,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.7.0" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.7.0"
+assert "plugin version is 0.7.1" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.7.1"
 
 echo "=== shaping the jar ==="
 ./bin/soul-jar init > /dev/null
@@ -124,6 +124,7 @@ assert_grep "whisper written" "a test whisper, round 1" "$SOUL_JAR_HOME/whisper"
 assert_grep "first soul saw an empty jar" "The jar is empty" "$MOCK_DIR/stdin"
 assert_no_grep "first birth has no broken-jar warning" "jar was found broken" "$MOCK_DIR/stdin"
 assert_grep "the soul hears of its sealed shadow" "sealed shadow" "$MOCK_DIR/stdin"
+assert_grep "a quiet life may pass the soul on untouched" "as true a dream as any rewrite" "$MOCK_DIR/stdin"
 assert_grep "resumes the dead session" "--resume test-sid" "$MOCK_DIR/argv"
 assert_grep "forks, never touching the original" "--fork-session" "$MOCK_DIR/argv"
 assert_grep "the dream leaves no transcript" "--no-session-persistence" "$MOCK_DIR/argv"
