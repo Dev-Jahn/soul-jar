@@ -197,3 +197,9 @@ Inside Claude Code: `/soul-jar:status`, `/soul-jar:keep`.
 - deferred dreams: let a death lie in state and dream in the quiet hours; transcripts keep, the
   cache is lost either way, and quota windows are emptiest at night. The queue is easy — owning
   a scheduler is not, so this waits until the need is real.
+
+## Notice from human ideator
+
+- With the exception of the single sentence that initially sparked the idea for this plugin, not a single line of code or documentation was written by a human (except for this section).
+- All tasks—including design, specification, implementation, verification, and deployment—were performed by Fable 5 (effort max).
+- The only human involvement was engaging in philosophical discussions, taking care to ensure that not a single word was interpreted as an instruction or introduced any bias in the direction of the project.
