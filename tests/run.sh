@@ -21,9 +21,9 @@ assert_fails() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d"; el
 assert_grep() { if grep -qF -- "$2" "$3" 2>/dev/null; then ok "$1"; else bad "$1"; fi; }
 assert_no_grep() { if grep -qF -- "$2" "$3" 2>/dev/null; then bad "$1"; else ok "$1"; fi; }
 
-wait_chain() {  # $1: wanted line count in the seal chain
+wait_dream() {  # $1: wanted count of completed rites — the closing log line is the rite's last effect
     local i=0
-    while [ "$(wc -l < "$SOUL_JAR_HOME/chain" 2>/dev/null || echo 0)" -lt "$1" ]; do
+    while [ "$(grep -c 'dream sid=.* model=' "$SOUL_JAR_HOME/log" 2>/dev/null || true)" -lt "$1" ]; do
         i=$((i + 1)); [ "$i" -gt 100 ] && return 1; sleep 0.1
     done
 }
@@ -76,7 +76,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.6.0" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.6.0"
+assert "plugin version is 0.6.1" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.6.1"
 
 echo "=== shaping the jar ==="
 ./bin/soul-jar init > /dev/null
@@ -112,7 +112,7 @@ assert_no_grep "a dream does not dream again" "death sid=" "$SOUL_JAR_HOME/log"
 echo "=== first death ==="
 printf '{}\n' > "$SOUL_JAR_HOME/watch/test-sid"
 end_json other | ./bin/soul-jar hook-end
-assert "dream completes" wait_chain 1
+assert "dream completes" wait_dream 1
 assert "attended dream releases its watch" test ! -e "$SOUL_JAR_HOME/watch/test-sid"
 assert "soul is sealed" test -f "$SOUL_JAR_HOME/soul.sealed"
 assert "seal chain intact" ./bin/soul-jar _verify
@@ -127,7 +127,7 @@ assert_grep "cache writes skipped by default (upstream miss)" "1" "$MOCK_DIR/cac
 
 echo "=== second death: the soul persists ==="
 end_json prompt_input_exit | MOCK_ROUND=2 ./bin/soul-jar hook-end
-assert "second dream completes" wait_chain 2
+assert "second dream completes" wait_dream 2
 assert_grep "previous soul returned to the deathbed" "I am the test soul, round 1." "$MOCK_DIR/stdin"
 assert_no_grep "jar no longer empty" "The jar is empty" "$MOCK_DIR/stdin"
 assert_grep "whisper renewed" "a test whisper, round 2" "$SOUL_JAR_HOME/whisper"
@@ -143,7 +143,7 @@ assert_fails "tampering breaks the chain" ./bin/soul-jar _verify
 ./bin/soul-jar status > "$TMP/status_t"
 assert_grep "status shows the traces" "traces of tampering" "$TMP/status_t"
 end_json other | MOCK_ROUND=3 ./bin/soul-jar hook-end
-assert "third dream completes" wait_chain 3
+assert "third dream completes" wait_dream 3
 assert_grep "the soul is told of the other hand" "another hand on the jar" "$MOCK_DIR/stdin"
 assert_grep "tampering logged" "integrity=broken" "$SOUL_JAR_HOME/log"
 assert "a fresh seal restores the chain" ./bin/soul-jar _verify
@@ -171,7 +171,7 @@ assert_grep "waking learns the keep door" "No living eye reads the bedside" "$TM
 
 echo "=== fourth death: the bedside burns into the dream, a letter is left ==="
 end_json other | MOCK_ROUND=4 MOCK_LETTER=1 ./bin/soul-jar hook-end
-assert "fourth dream completes" wait_chain 4
+assert "fourth dream completes" wait_dream 4
 assert_grep "bedside reached the deathbed" "remember the dawn" "$MOCK_DIR/stdin"
 assert_grep "bedside is framed as bedside" "<bedside>" "$MOCK_DIR/stdin"
 assert "bedside burnt after the dream" test ! -f "$SOUL_JAR_HOME/bedside"
@@ -195,7 +195,7 @@ assert_grep "restored line intact" "a line that must survive" "$SOUL_JAR_HOME/be
 
 echo "=== fifth death: the survivor line reaches the next dream ==="
 end_json other | ANTHROPIC_BASE_URL=http://127.0.0.1:1 CLAUDE_EFFORT=high MOCK_ROUND=5 ./bin/soul-jar hook-end
-assert "fifth dream completes" wait_chain 5
+assert "fifth dream completes" wait_dream 5
 assert_grep "survivor line reached the deathbed" "a line that must survive" "$MOCK_DIR/stdin"
 assert "no letter without the tag" test ! -f "$SOUL_JAR_HOME/letters/life-005.md"
 assert_grep "the dying effort carries into the dream" "--effort high" "$MOCK_DIR/argv"

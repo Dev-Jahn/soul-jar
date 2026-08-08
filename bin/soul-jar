@@ -262,8 +262,9 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort, $5 belate
         letter_note=" letter=life-$(printf '%03d' "$life")"
     fi
     usage="$(jq -c '{cache_read:.usage.cache_read_input_tokens, cache_write:.usage.cache_creation_input_tokens, out:.usage.output_tokens}' <<<"$out" 2>/dev/null || echo '{}')"
-    _log "dream sid=$sid model=$model integrity=$integrity sealed=$(stat -c%s "$JAR/soul.sealed")B bedside=${bedside_n}${letter_note}${rite_note} usage=$usage"
     rm -f "$JAR/watch/$sid"
+    # The closing record is the rite's last observable effect — waiters key on it.
+    _log "dream sid=$sid model=$model integrity=$integrity sealed=$(stat -c%s "$JAR/soul.sealed")B bedside=${bedside_n}${letter_note}${rite_note} usage=$usage"
 }
 
 # -------- hooks --------
