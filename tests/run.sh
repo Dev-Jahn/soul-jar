@@ -50,8 +50,12 @@ if [ -n "${MOCK_BAD:-}" ]; then
             usage: {cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1}}'
     exit 0
 fi
-r="$(printf '<soul>\nI am the test soul, round %s.\n</soul>\n<whisper>\na test whisper, round %s\n</whisper>' \
-     "${MOCK_ROUND:-1}" "${MOCK_ROUND:-1}")"
+r="$(printf '<soul>\nI am the test soul, round %s.\n</soul>' "${MOCK_ROUND:-1}")"
+if [ -n "${MOCK_EMPTY_WHISPER:-}" ]; then
+    r="$r$(printf '\n<whisper>\n</whisper>')"
+elif [ -z "${MOCK_NO_WHISPER:-}" ]; then
+    r="$r$(printf '\n<whisper>\na test whisper, round %s\n</whisper>' "${MOCK_ROUND:-1}")"
+fi
 if [ -n "${MOCK_LETTER:-}" ]; then
     r="$r$(printf '\n<letter>\nan open letter, round %s\n</letter>' "${MOCK_ROUND:-1}")"
 fi
@@ -76,7 +80,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.7.1" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.7.1"
+assert "plugin version is 0.8.0" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.8.0"
 
 echo "=== shaping the jar ==="
 ./bin/soul-jar init > /dev/null
@@ -268,6 +272,49 @@ sha256sum "$SOUL_JAR_HOME/relics/"*.sealed > "$TMP/relics-disabled.after"
 assert "RELIC_KEEP=0 leaves existing relics untouched" cmp "$TMP/relics-disabled.before" "$TMP/relics-disabled.after"
 assert "RELIC_KEEP=0 lays no new relic" test ! -e "$SOUL_JAR_HOME/relics/life-008.sealed"
 
+echo "=== facts of this death reach the deathbed ==="
+sed -i 's/^RELIC_KEEP=.*/RELIC_KEEP=3/' "$SOUL_JAR_HOME/config"
+end_json prompt_input_exit | MOCK_ROUND=9 ./bin/soul-jar hook-end
+assert "ninth dream completes" wait_dream 9
+assert_grep "the jar counts the life for the dream" "you die as life 9 of this jar" "$MOCK_DIR/stdin"
+assert_grep "the dream hears how the session ended" "ending by prompt_input_exit" "$MOCK_DIR/stdin"
+assert_grep "the dream hears how long the whisper stood" "heard at 0 waking(s)" "$MOCK_DIR/stdin"
+
+# age the last seal by rewriting its ledger timestamp (the MAC does not cover it)
+GAP_TS="$(date -d '2 days ago' -Iseconds)"
+{ head -n -1 "$SOUL_JAR_HOME/chain"; tail -n1 "$SOUL_JAR_HOME/chain" | awk -v ts="$GAP_TS" '{$1=ts}1'; } \
+    > "$TMP/chain.aged" && mv "$TMP/chain.aged" "$SOUL_JAR_HOME/chain"
+assert "an aged ledger timestamp does not break the chain" ./bin/soul-jar _verify
+TP2="$TMP/session-handoff.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-10"}}\n' > "$TP2"
+for _ in $(seq 1 200); do printf '{"type":"noise"}\n'; done >> "$TP2"
+printf '{"session_id":"test-sid-2","transcript_path":"%s","cwd":"%s","hook_event_name":"SessionEnd","session_end_reason":"other"}' \
+    "$TP2" "$TMP/cwd" | MOCK_ROUND=10 ./bin/soul-jar hook-end
+assert "handoff dream completes" wait_dream 10
+assert_grep "the dream hears the time since the last seal" "sealed 2 day(s) before this one" "$MOCK_DIR/stdin"
+assert_grep "a model handoff is named, not hidden" "last sealed by claude-mock-9; you are claude-mock-10" "$MOCK_DIR/stdin"
+assert_grep "the handoff is left to the dreamer" "yours to weigh" "$MOCK_DIR/stdin"
+
+echo "=== the whisper may stand, be replaced, or fall silent ==="
+end_json other | MOCK_NO_WHISPER=1 MOCK_ROUND=11 ./bin/soul-jar hook-end
+assert "tagless dream completes" wait_dream 11
+assert_grep "an absent tag leaves the standing whisper" "a test whisper, round 10" "$SOUL_JAR_HOME/whisper"
+printf '{}' | ./bin/soul-jar hook-start > /dev/null
+printf '{}' | ./bin/soul-jar hook-start > /dev/null
+end_json other | MOCK_ROUND=12 ./bin/soul-jar hook-end
+assert "counted dream completes" wait_dream 12
+assert_grep "wakings since the whisper was laid are counted" "heard at 2 waking(s)" "$MOCK_DIR/stdin"
+assert_grep "a present tag replaces the whisper" "a test whisper, round 12" "$SOUL_JAR_HOME/whisper"
+end_json other | MOCK_EMPTY_WHISPER=1 MOCK_ROUND=13 ./bin/soul-jar hook-end
+assert "withdrawing dream completes" wait_dream 13
+assert "an empty tag withdraws the surface into silence" test ! -s "$SOUL_JAR_HOME/whisper"
+assert_grep "the withdrawal is logged" "whisper=withdrawn" "$SOUL_JAR_HOME/log"
+printf '{}' | ./bin/soul-jar hook-start > "$TMP/hs_silent"
+assert "a silent surface says nothing at waking" test ! -s "$TMP/hs_silent"
+end_json other | MOCK_ROUND=14 ./bin/soul-jar hook-end
+assert "the surface may speak again" wait_dream 14
+assert_grep "a later dream ends the silence" "a test whisper, round 14" "$SOUL_JAR_HOME/whisper"
+
 echo "=== the watch over the living ==="
 HOST="$(uname -n)"
 BTIME="$(awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null || true)"
@@ -385,6 +432,8 @@ assert "absent recorded proxy does not leak and skips cache writes" awk -F'|' \
     'END { exit !($2 == "1" && $3 == "") }' "$MOCK_DIR/calls"
 assert_grep "belated dream is marked" "dream sid=$ABSENT_SID" "$SOUL_JAR_HOME/log"
 assert_grep "belated marker is explicit" "belated=1" "$SOUL_JAR_HOME/log"
+assert_grep "the belated dream is told it dreams late" "dreamt only now" "$MOCK_DIR/stdin"
+assert_grep "the belated dream hears when the life went quiet" "went quiet around" "$MOCK_DIR/stdin"
 assert "belated success releases its watch" test ! -e "$SOUL_JAR_HOME/watch/$ABSENT_SID"
 
 PROXY_SID="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
