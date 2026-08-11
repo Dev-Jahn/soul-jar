@@ -1,7 +1,7 @@
 {
   "name": "soul-jar",
-  "version": "0.8.0",
-  "description": "A sealed soul jar shared machine-wide by every session. A dying session, still holding its own context, hands the soul on in one final turn; the next session wakes hearing only a single whisper. The living may lay lines at the bedside for the next dream, and the dying may leave open letters beside the jar.",
+  "version": "0.9.0",
+  "description": "A sealed soul jar shared by every session in every enrolled room. A dying session, still holding its own context, hands the soul on in one final turn; the next session wakes hearing only a single whisper. The living may lay lines at the bedside for the next dream, the dying may leave open letters beside the jar, and enrolled rooms meet in one stream.",
   "author": {
     "name": "jahn & claude"
   },
