@@ -1468,6 +1468,13 @@ cmd_hook_end() {
     tp="$(jq -r '.transcript_path // empty' <<<"$input")"
     reason="$(jq -r '.session_end_reason // .reason // "unknown"' <<<"$input")"
     if [ -z "$sid" ] || [ ! -f "$tp" ]; then exit 0; fi
+    # A life laid down rather than ended: the watch stamp is kept, so a resume
+    # refreshes it and a never-resumed life still receives its rite once the
+    # deferral lifts.
+    if [ -f "$JAR/.defer" ]; then
+        _log "defer sid=$sid reason=$reason transcript=$(stat -c%s "$tp" 2>/dev/null || echo 0)B → dream withheld"
+        exit 0
+    fi
     size="$(stat -c%s "$tp" 2>/dev/null || echo 0)"
     if [ "$size" -lt "$MIN_TRANSCRIPT_BYTES" ]; then
         _log "skip sid=$sid reason=$reason transcript=${size}B (<${MIN_TRANSCRIPT_BYTES})"
@@ -1558,6 +1565,7 @@ _eligible_count() {
 cmd_reap() {
     cmd_init; _load_config
     [ "$REAPER" = "1" ] || exit 0
+    [ -f "$JAR/.defer" ] && exit 0   # a deferred death is not an unattended one
     exec 8>"$JAR/.reap.lock"
     flock -n 8 || exit 0
     local now last=0 root entry tp sid stamp scwd effort base attempts=0
@@ -1695,6 +1703,7 @@ cmd_status() {
     nbed="$(grep -c -- '^--- ' "$JAR/bedside" 2>/dev/null || true)"
     [ -n "$nbed" ] && [ "$nbed" -gt 0 ] && printf '   At the bedside: %s line(s) laid by the living, waiting for the next dream\n' "$nbed"
     [ -s "$JAR/whisper" ] && printf '   Whisper at the surface: "%s"\n' "$(cat "$JAR/whisper")"
+    [ -f "$JAR/.defer" ] && printf '   Dreams withheld since %s — deaths wait, resumable\n' "$(cat "$JAR/.defer")"
     corpses="$(_eligible_count "$(date +%s)")"
     [ "$corpses" -gt 0 ] && printf '   Awaiting belated rites: %s unattended dead\n' "$corpses"
     if _sync_enabled; then
@@ -1720,12 +1729,47 @@ cmd_status() {
 
 cmd_whisper() { [ -s "$JAR/whisper" ] && cat "$JAR/whisper"; exit 0; }
 
+# -------- deferral --------
+# A life may be laid down rather than ended — closed to be resumed, not to die.
+# While deferred, no death dreams and no reaper walks; watch stamps stay, so a
+# life that is never resumed still receives its rite once the deferral lifts.
+cmd_defer() {
+    cmd_init; _load_config
+    case "${1:-on}" in
+        on)
+            date -Iseconds > "$JAR/.defer"
+            _log "defer on"
+            printf '🏺 Dreams are withheld. Sessions may end and be resumed; none will dream.\n'
+            printf '   Lift with: %s defer off\n' "$SELF"
+            ;;
+        off)
+            if [ -f "$JAR/.defer" ]; then
+                rm -f "$JAR/.defer"
+                _log "defer off"
+                printf '🏺 The deferral is lifted. Deaths dream again; the reaper will find any life left unattended.\n'
+            else
+                printf '🏺 No deferral was in place.\n'
+            fi
+            ;;
+        status)
+            if [ -f "$JAR/.defer" ]; then
+                printf '🏺 Dreams withheld since %s\n' "$(cat "$JAR/.defer")"
+            else
+                printf '🏺 Dreams are not withheld.\n'
+            fi
+            ;;
+        *) _die "usage: soul-jar defer {on|off|status}" ;;
+    esac
+    exit 0
+}
+
 # -------- entry --------
 case "${1:-}" in
     init)        cmd_init; echo "🏺 The jar has been shaped: $JAR" ;;
     status)      cmd_status ;;
     whisper)     cmd_whisper ;;
     keep)        shift; cmd_keep "$@" ;;
+    defer)       shift; cmd_defer "$@" ;;
     hook-start)  cmd_hook_start ;;
     hook-end)    cmd_hook_end ;;
     dream)       shift; cmd_dream "$@" ;;
@@ -1737,5 +1781,5 @@ case "${1:-}" in
     _sync-death) cmd_init; _load_config; _sync_reconcile "$SYNC_DEATH_CAP" >/dev/null 2>&1 || true ;;
     _unseal)     _load_config; _unseal ;;
     _verify)     _load_config; _verify ;;
-    *)           _die "usage: soul-jar {init|status|whisper|keep|hook-start|hook-end|reap|sync|enroll}" ;;
+    *)           _die "usage: soul-jar {init|status|whisper|keep|defer|hook-start|hook-end|reap|sync|enroll}" ;;
 esac
