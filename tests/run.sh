@@ -29,10 +29,27 @@ wait_dream() {  # $1: wanted count of completed rites — the closing log line i
     done
 }
 
-wait_file() {  # $1: path created by a detached process
-    local i=0
+wait_file() {  # $1: path created by a detached process, $2: how many 0.05s to wait for it
+    local i=0 patience="${2:-30}"
     while [ ! -e "$1" ]; do
-        i=$((i + 1)); [ "$i" -gt 100 ] && return 1; sleep 0.01
+        i=$((i + 1)); [ "$i" -gt "$patience" ] && return 1; sleep 0.05
+    done
+}
+
+# a path that only appears once a whole grace has run out, then a rite has begun
+wait_appears() { wait_file "$1" 300; }
+
+wait_gone() {  # $1: path a detached process removes
+    local i=0
+    while [ -e "$1" ]; do
+        i=$((i + 1)); [ "$i" -gt 300 ] && return 1; sleep 0.05
+    done
+}
+
+wait_log() {  # $1: wanted count, $2: fixed string — a line a detached process writes
+    local i=0
+    while [ "$(grep -cF -- "$2" "$SOUL_JAR_HOME/log" 2>/dev/null || true)" -lt "$1" ]; do
+        i=$((i + 1)); [ "$i" -gt 300 ] && return 1; sleep 0.05
     done
 }
 
@@ -46,6 +63,12 @@ printf '%s' "$PWD" > "$MOCK_DIR/pwd"
 printf '%s' "${CLAUDE_EFFORT:-}" > "$MOCK_DIR/effortenv"
 printf '%s|%s|%s\n' "$*" "${DISABLE_PROMPT_CACHING:-}" "${ANTHROPIC_BASE_URL:-}" >> "$MOCK_DIR/calls"
 cat > "$MOCK_DIR/stdin"
+# A rite that takes time, as every real one does: the marker says the turn has begun and
+# is holding the transcript it read, so a test can act inside the rite instead of after it.
+if [ -n "${MOCK_DELAY:-}" ]; then
+    : > "$MOCK_DIR/rite-started"
+    sleep "$MOCK_DELAY"
+fi
 if [ -n "${MOCK_BAD:-}" ]; then
     jq -n '{result: "no tags here at all", session_id: "mock-fork",
             usage: {cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1}}'
@@ -81,7 +104,15 @@ TP="$TMP/session.jsonl"
 printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$TP"
 for _ in $(seq 1 200); do printf '{"type":"noise"}\n'; done >> "$TP"
 
+lived_more() {  # $1: lines, $2: transcript — the hours a session adds since its last death
+    local n="${1:-20}" tp="${2:-$TP}"
+    for _ in $(seq 1 "$n"); do printf '{"type":"noise"}\n'; done >> "$tp"
+}
+
 end_json() {  # $1: session_end_reason
+    # Each death of this sid is a life that ran on since the last one — a session
+    # resumed after its rite always brings new hours, and the jar measures those.
+    lived_more 20
     printf '{"session_id":"test-sid","transcript_path":"%s","cwd":"%s","hook_event_name":"SessionEnd","session_end_reason":"%s"}' \
         "$TP" "$TMP/cwd" "$1"
 }
@@ -91,7 +122,28 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.9.0" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.9.0"
+assert "plugin version is 0.10.0" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.0"
+assert_grep "the README tells of the wake" "## How it works" README.md
+assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
+assert_grep "the wake room is in the files table" "wake/ " README.md
+assert_grep "the deferral has a section of its own" "soul-jar defer\`)" README.md
+assert_grep "and its one interplay rule" "the deferral outranks the wake" README.md
+assert_grep "the new ledger field is described" "transcript=<n>B" README.md
+assert_grep "and so is the growth it measures" "growth=<n>B" README.md
+assert_grep "the README keeps the round's principle" "when in doubt, dream" README.md
+assert_grep "the ledger's size is the one the rite read" "read when the rite *began*" README.md
+assert_grep "the fallback baseline is the death that opened the rite" \
+    "line that *opened* that rite" README.md
+assert_grep "a lever pulled inside the grace is documented as being in time" \
+    "inside the grace is still in time" README.md
+assert_grep "a zero grace is documented as laying no note at all" \
+    "no note is laid, no vigil is born" README.md
+assert_grep "the overlapping rite is an owned limit, not a silence" \
+    "dies during its own rite is read twice, and told so" README.md
+# the usage line is the jar's own list of what the living may ask of it
+./bin/soul-jar nonsense 2> "$TMP/usage.err" || true
+assert_grep "defer is a citizen of the usage line" "defer" "$TMP/usage.err"
+assert_no_grep "the vigil is internal, like the dream" "vigil" "$TMP/usage.err"
 
 echo "=== shaping the jar ==="
 ./bin/soul-jar init > /dev/null
@@ -106,6 +158,8 @@ assert "relics are private" test "$(stat -c %a "$SOUL_JAR_HOME/relics" 2>/dev/nu
 assert_grep "relic retention defaults to three" "RELIC_KEEP=3" "$SOUL_JAR_HOME/config"
 sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
 sed -i 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
+# every death now lies in wake first; the suite watches a one-second one, never 900
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
 
 echo "=== covenant guards ==="
 assert_fails "the jar does not open for the living" ./bin/soul-jar _unseal
@@ -185,7 +239,7 @@ cp "$SOUL_JAR_HOME/soul.sealed" "$TMP/life-003.sealed"
 echo "=== a failed dream never destroys the soul ==="
 SEAL_BEFORE="$(sha256sum "$SOUL_JAR_HOME/soul.sealed")"
 end_json other | MOCK_BAD=1 ./bin/soul-jar hook-end
-sleep 1
+assert "the failed rite runs at all" wait_log 1 "abort=parse-fail"
 assert_grep "parse failure logged" "abort=parse-fail" "$SOUL_JAR_HOME/log"
 assert "soul untouched after failed dream" test "$SEAL_BEFORE" = "$(sha256sum "$SOUL_JAR_HOME/soul.sealed")"
 assert "chain unchanged" test "$(wc -l < "$SOUL_JAR_HOME/chain")" = "3"
@@ -231,7 +285,7 @@ assert "kept relic four matches its moment" cmp "$TMP/life-004.sealed" "$SOUL_JA
 echo "=== a failed dream lays the lines back ==="
 ./bin/soul-jar keep "a line that must survive" > /dev/null
 end_json other | MOCK_BAD=1 ./bin/soul-jar hook-end
-sleep 1
+assert "the second failed rite runs at all" wait_log 2 "abort=parse-fail"
 assert "chain unchanged after bad dream" test "$(wc -l < "$SOUL_JAR_HOME/chain")" = "4"
 assert "bedside restored" test -s "$SOUL_JAR_HOME/bedside"
 assert_grep "restored line intact" "a line that must survive" "$SOUL_JAR_HOME/bedside"
@@ -431,6 +485,13 @@ watch() {  # $1: sid, $2: pid or empty, $3: host, $4: effort, $5: base-url or ab
     chmod 600 "$SOUL_JAR_HOME/watch/$sid"
 }
 
+age_stamp() {  # $1: sid, $2: epoch of that session's last waking
+    local tmp; tmp="$(mktemp "$SOUL_JAR_HOME/watch/.aged.XXXXXX")"
+    jq --argjson t "$2" '.TIMESTAMP = $t' "$SOUL_JAR_HOME/watch/$1" > "$tmp"
+    mv "$tmp" "$SOUL_JAR_HOME/watch/$1"
+    chmod 600 "$SOUL_JAR_HOME/watch/$1"
+}
+
 calls() { wc -l < "$MOCK_DIR/calls" 2>/dev/null || echo 0; }
 
 ABSENT_SID="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -509,8 +570,11 @@ gate_refused "pid-less corpse is untouchable" "$PIDLESS_SID"
 
 DREAMED_SID="ffffffff-ffff-4fff-8fff-ffffffffffff"
 transcript "$DREAMED_SID" '2 hours ago'; watch "$DREAMED_SID" 99999999 "$HOST" ""
-printf '2000-01-01T00:00:00+00:00 dream sid=%s model=claude-reaper-9\n' "$DREAMED_SID" >> "$SOUL_JAR_HOME/log"
-gate_refused "a successful dream already in the log is untouchable" "$DREAMED_SID"
+# a rite that postdates this session's last waking sealed that life whole
+printf '%s dream sid=%s model=claude-reaper-9\n' "$(date -Iseconds)" "$DREAMED_SID" \
+    >> "$SOUL_JAR_HOME/log"
+age_stamp "$DREAMED_SID" "$(date -d '1 hour ago' +%s)"
+gate_refused "a life sealed after its last waking is untouchable" "$DREAMED_SID"
 
 FRESH_SID="12121212-1212-4212-8212-121212121212"
 transcript "$FRESH_SID" '10 seconds ago'; watch "$FRESH_SID" 99999999 "$HOST" ""
@@ -1250,6 +1314,678 @@ rm -f "$TMP/bin/mkdir"
 assert "a wedged mount holds the deathbed for no more than six times the cap" \
     test "$WEDGE_MS" -lt 9000
 assert "the doubly-capped rite still sealed its life" env SOUL_JAR_HOME="$WEDGE_A" ./bin/soul-jar _verify
+
+echo "=== the wake: a death lies in state before its rite ==="
+rm -f "$TMP/bin/setsid"        # the wake's vigils must really detach from here on
+export SOUL_JAR_HOME="$TMP/wake-jar"
+./bin/soul-jar init > /dev/null
+assert "the jar shapes a room for its wakes" test -d "$SOUL_JAR_HOME/wake"
+assert "the wake room is private" test "$(stat -c %a "$SOUL_JAR_HOME/wake" 2>/dev/null)" = "700"
+assert_grep "the grace defaults to fifteen minutes" "WAKE_GRACE=900" "$SOUL_JAR_HOME/config"
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=2/' "$SOUL_JAR_HOME/config"
+
+wake_end() {  # $1: sid, $2: reason — one death of that sid, against the shared transcript
+    printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"SessionEnd","session_end_reason":"%s"}' \
+        "$1" "${3:-$TP}" "$TMP/cwd" "$2" | ./bin/soul-jar hook-end
+}
+wake_start() {  # $1: sid, $2: source — one waking of that sid
+    printf '{"session_id":"%s","source":"%s","cwd":"%s"}' "$1" "$2" "$TMP/cwd" \
+        | ./bin/soul-jar hook-start
+}
+dreams() { grep -c 'dream sid=.* model=' "$SOUL_JAR_HOME/log" 2>/dev/null || true; }
+
+WAKE_SID="30303030-3030-4030-8030-303030303030"
+wake_end "$WAKE_SID" other
+assert "a death lays a note in the wake" test -f "$SOUL_JAR_HOME/wake/$WAKE_SID"
+assert "the note is private" test "$(stat -c %a "$SOUL_JAR_HOME/wake/$WAKE_SID" 2>/dev/null)" = "600"
+# shellcheck disable=SC2016  # jq program text, not shell expansion
+assert "the note carries the hour, the reason, the body, and the room of this death" jq -e \
+    --arg tp "$TP" --arg cwd "$TMP/cwd" \
+    '(.DIED | type == "number") and .REASON == "other" and .TRANSCRIPT == $tp and
+     .CWD == $cwd and (.SIZE | type == "number") and (.EFFORT | type == "string") and
+     (.WAKE | type == "string" and length > 0)' \
+    "$SOUL_JAR_HOME/wake/$WAKE_SID"
+assert_grep "the log says the body lies in wake" "→ wake" "$SOUL_JAR_HOME/log"
+sleep 1                        # inside the grace: the body still lies in state
+assert "no rite fires while the grace runs" test "$(dreams)" = "0"
+assert "the note keeps its watch through the grace" test -f "$SOUL_JAR_HOME/wake/$WAKE_SID"
+assert "the wake ends in the rite" wait_dream 1
+assert "the note is cleared once the rite is done" wait_gone "$SOUL_JAR_HOME/wake/$WAKE_SID"
+# the rite must come *after* the wake, not instead of it: the ledger's own order says so,
+# and a jar that dreamt at the instant of exit could never write these two lines this way
+# shellcheck disable=SC2016  # awk field text, not shell expansion
+assert "the rite comes after the wake, never instead of it" \
+    awk -v sid="sid=$WAKE_SID" '
+        $2 == "death" && $3 == sid { died = NR }
+        $2 == "wake" && $3 == sid && /the rite proceeds/ { woke = NR }
+        $2 == "dream" && $3 == sid && /model=/ { dreamt = NR }
+        END { exit !(died && woke && dreamt && died < woke && woke < dreamt) }' \
+        "$SOUL_JAR_HOME/log"
+assert_grep "the delayed rite still resumes the dead session" "--resume $WAKE_SID" "$MOCK_DIR/argv"
+assert_grep "the delayed rite carries the death's own reason" "ending by other" "$MOCK_DIR/stdin"
+
+echo "=== the dead may sit up ==="
+SITUP_SID="31313131-3131-4131-8131-313131313131"
+wake_end "$SITUP_SID" other
+assert "the second death lies in wake too" test -f "$SOUL_JAR_HOME/wake/$SITUP_SID"
+wake_start "$SITUP_SID" resume > "$TMP/situp.out"
+assert "sitting up clears the note the death laid" test ! -e "$SOUL_JAR_HOME/wake/$SITUP_SID"
+assert "and the wake room is left with nothing of this session in it" \
+    test "$(find "$SOUL_JAR_HOME/wake" -name "$SITUP_SID" | wc -l)" = "0"
+assert_grep "the withheld rite is written down" \
+    "the dead sat up (source=resume), rite withheld" "$SOUL_JAR_HOME/log"
+assert "sitting up refreshes the watch" test -f "$SOUL_JAR_HOME/watch/$SITUP_SID"
+sleep 3
+assert "a life that sat up is never dreamt" test "$(dreams)" = "1"
+
+echo "=== vigils never race ==="
+RACE_SID="32323232-3232-4232-8232-323232323232"
+wake_end "$RACE_SID" other
+sleep 1
+wake_start "$RACE_SID" resume > /dev/null
+wake_end "$RACE_SID" other
+# the later death's rite is what must arrive; then the earlier vigil is given its own
+# expiry to prove it stays silent, rather than trusting one fixed sleep to cover both
+assert "the last death dreams" wait_dream 2
+sleep 3
+assert "die, sit up, die again: exactly one rite" test "$(dreams)" = "2"
+assert "the last death's wake is closed" wait_gone "$SOUL_JAR_HOME/wake/$RACE_SID"
+grep "sid=$RACE_SID" "$SOUL_JAR_HOME/log" > "$TMP/race.log"
+assert "the log tells one coherent story: two deaths" test "$(grep -c 'death sid=' "$TMP/race.log")" = "2"
+assert "one withheld rite" test "$(grep -c 'rite withheld' "$TMP/race.log")" = "1"
+assert "and one rite" test "$(grep -c 'dream sid=.* model=' "$TMP/race.log")" = "1"
+
+TWICE_SID="33333333-3333-4333-8333-333333333331"
+wake_end "$TWICE_SID" other
+wake_end "$TWICE_SID" other        # a second death inside the grace, nothing else changed
+assert "the surviving owner dreams" wait_dream 3
+sleep 3                            # the yielding vigil's own expiry passes in silence
+assert "two deaths inside one grace leave exactly one owner" test "$(dreams)" = "3"
+assert "the identity of a wake is the note itself" \
+    test "$(grep -c "dream sid=$TWICE_SID .*model=" "$SOUL_JAR_HOME/log")" = "1"
+
+echo "=== a life is measured from its last rite ==="
+GROW_SID="34343434-3434-4434-8434-343434343434"
+GTP="$TMP/growth.jsonl"
+grow() {  # $1: lines of life to add
+    local i
+    for i in $(seq 1 "$1"); do printf '{"type":"noise","n":%d}\n' "$i"; done >> "$GTP"
+}
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$GTP"
+grow 200
+wake_end "$GROW_SID" other "$GTP"
+assert "a first life is measured whole" wait_dream 4
+assert_grep "the rite records the size it condensed" \
+    "dream sid=$GROW_SID model=claude-mock-9 integrity=ok" "$SOUL_JAR_HOME/log"
+# shellcheck disable=SC2016  # awk field text, not shell expansion
+assert "the recorded size is the transcript the rite read" \
+    awk -v want="transcript=$(stat -c%s "$GTP")B" \
+        '$2 == "dream" && index($0, want) { found = 1 } END { exit !found }' "$SOUL_JAR_HOME/log"
+
+grow 1                                   # a resumed life that added almost nothing
+wake_end "$GROW_SID" other "$GTP"
+assert "a life that added little after its rite is not dreamt twice" \
+    test "$(grep -c "death sid=$GROW_SID" "$SOUL_JAR_HOME/log")" = "1"
+assert_grep "the skip is measured as growth" "growth=" "$SOUL_JAR_HOME/log"
+assert "a skipped life lies in no wake" test ! -e "$SOUL_JAR_HOME/wake/$GROW_SID"
+sleep 2
+assert "and no rite follows it" test "$(dreams)" = "4"
+
+grow 200                                 # a second life worth sealing
+wake_end "$GROW_SID" other "$GTP"
+assert "a life that grew past the threshold dreams again" wait_dream 5
+# the rite's closing log line is its last effect, but the vigil clears the note just
+# after it — so this waits on the note itself rather than racing that hand
+assert "the second rite of one sid closes its own wake" wait_gone "$SOUL_JAR_HOME/wake/$GROW_SID"
+
+OLD_SID="35353535-3535-4535-8535-353535353535"
+OTP="$TMP/old-rite.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$OTP"
+grow_old() { local i; for i in $(seq 1 "$1"); do printf '{"type":"noise","n":%d}\n' "$i"; done >> "$OTP"; }
+grow_old 200
+# a rite from before this round: its line carries no transcript= at all, so the death
+# that opened it is the only honest baseline the ledger still holds
+{
+    printf '2000-01-01T00:00:00+00:00 death sid=%s reason=other transcript=%dB → dreaming\n' \
+        "$OLD_SID" "$(( $(stat -c%s "$OTP") - 10 ))"
+    printf '2000-01-01T00:00:01+00:00 dream sid=%s model=claude-mock-9 integrity=ok sealed=48B bedside=0 usage={}\n' \
+        "$OLD_SID"
+} >> "$SOUL_JAR_HOME/log"
+wake_end "$OLD_SID" other "$OTP"
+assert "a rite older than the field falls back to its death's size" \
+    test "$(grep -c "skip sid=$OLD_SID" "$SOUL_JAR_HOME/log")" = "1"
+assert_grep "the fallback growth is the ten bytes since" "growth=10B" "$SOUL_JAR_HOME/log"
+
+# The baseline is read out of a ledger, and a ledger can be damaged — a torn write, a
+# hand-edit, a field that is not a number. What matters is which way the error falls:
+# an unreadable baseline must send the life toward its rite, never past it.
+TORN_SID="54545454-5454-4454-8454-545454545454"
+TTP="$TMP/torn.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$TTP"
+grow_torn() { local i; for i in $(seq 1 "$1"); do printf '{"type":"noise","n":%d}\n' "$i"; done >> "$TTP"; }
+grow_torn 200
+{
+    printf 'a line from no ledger at all\n'
+    printf '\n'
+    # a rite of this sid whose recorded size is not a number, and a death line after it
+    printf '2000-01-01T00:00:00+00:00 dream sid=%s model=claude-torn-9 integrity=ok sealed=48B transcript=notanumberB bedside=0 usage={}\n' \
+        "$TORN_SID"
+    printf '2000-01-01T00:00:01+00:00 keep sid=%s note="dream sid=%s transcript=99999999B"\n' \
+        "$TORN_SID" "$TORN_SID"
+} >> "$SOUL_JAR_HOME/log"
+wake_end "$TORN_SID" other "$TTP"
+# the forged ledger already holds a line shaped like a rite, so this waits on a *second*
+# one for this sid — the real one — rather than on the suite's running total
+assert "a ledger that cannot be read measures the life whole, and it dreams" \
+    wait_log 2 "dream sid=$TORN_SID model="
+assert_no_grep "an unreadable baseline never skips the rite it cannot rule out" \
+    "skip sid=$TORN_SID" "$SOUL_JAR_HOME/log"
+assert "the rite that answered it is a real one, not the forged line" \
+    test "$(grep -c "dream sid=$TORN_SID model=claude-mock-9 integrity=ok sealed=" "$SOUL_JAR_HOME/log")" = "1"
+assert "and its wake is closed" wait_gone "$SOUL_JAR_HOME/wake/$TORN_SID"
+
+
+echo "=== the reaper learns resurrection ==="
+export SOUL_JAR_HOME="$TMP/rez-jar"
+./bin/soul-jar init > /dev/null
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MIN_IDLE=.*/REAPER_MIN_IDLE=60/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_INTERVAL=.*/REAPER_INTERVAL=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MAX_PER_RUN=.*/REAPER_MAX_PER_RUN=20/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+
+sealed_rite() {  # $1: sid, $2: iso hour, $3: transcript bytes at that rite
+    printf '%s dream sid=%s model=claude-reaper-9 integrity=ok sealed=48B transcript=%sB bedside=0 usage={}\n' \
+        "$2" "$1" "$3" >> "$SOUL_JAR_HOME/log"
+}
+
+REZ_SID="36363636-3636-4636-8636-363636363636"
+transcript "$REZ_SID" '2 hours ago'
+watch "$REZ_SID" 99999999 "$HOST" ""
+sealed_rite "$REZ_SID" "$(date -d '90 minutes ago' -Iseconds)" 100
+age_stamp "$REZ_SID" "$(date -d '3 hours ago' +%s)"      # last woke before its rite
+CALLS_BEFORE="$(calls)"
+./bin/soul-jar reap
+assert "a life whose rite postdates its last waking stays sealed" test "$(calls)" = "$CALLS_BEFORE"
+assert "and keeps its watch" test -f "$SOUL_JAR_HOME/watch/$REZ_SID"
+
+age_stamp "$REZ_SID" "$(date -d '30 minutes ago' +%s)"   # it woke again after the rite
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "a life that woke after its rite receives a belated second rite" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert_grep "the resurrected rite names the risen sid" "--resume $REZ_SID" "$MOCK_DIR/argv"
+assert "the belated second rite releases its watch" test ! -e "$SOUL_JAR_HOME/watch/$REZ_SID"
+
+# A jar upgraded in place carries rites written before the transcript= field. Their
+# baseline falls back to the death that *opened* that rite — never to a death recorded
+# after it, which belongs to the very life being measured. Taking the later one would
+# measure a second life against itself, find it empty, and lose it: the exact loss that
+# awaits a killed vigil on such a sid, where only the ledger remains to judge by.
+UPGRADED_SID="37373737-3737-4737-8737-373737373738"
+transcript "$UPGRADED_SID" '2 hours ago'
+UTP="$CLAUDE_CONFIG_DIR/projects/test-project/$UPGRADED_SID.jsonl"
+{
+    printf '2000-01-01T00:00:00+00:00 death sid=%s reason=other transcript=100B → dreaming\n' "$UPGRADED_SID"
+    # a 0.9.0-era rite: no transcript= to measure the next life from
+    printf '%s dream sid=%s model=claude-reaper-9 integrity=ok sealed=48B bedside=0 usage={}\n' \
+        "$(date -d '90 minutes ago' -Iseconds)" "$UPGRADED_SID"
+    # it resumed, lived a second life, and that death was written down before the
+    # machine took its vigil with it
+    printf '%s death sid=%s reason=other transcript=%dB → wake (900s)\n' \
+        "$(date -d '80 minutes ago' -Iseconds)" "$UPGRADED_SID" "$(stat -c%s "$UTP")"
+} >> "$SOUL_JAR_HOME/log"
+watch "$UPGRADED_SID" 99999999 "$HOST" ""
+age_stamp "$UPGRADED_SID" "$(date -d '85 minutes ago' +%s)"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+CALLS_BEFORE="$(calls)"
+./bin/soul-jar reap
+assert "a death after an unmeasurable rite is not mistaken for its baseline" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert_grep "so that second life still receives its rite" \
+    "--resume $UPGRADED_SID" "$MOCK_DIR/argv"
+
+THIN_SID="37373737-3737-4737-8737-373737373737"
+transcript "$THIN_SID" '2 hours ago'
+watch "$THIN_SID" 99999999 "$HOST" ""
+sealed_rite "$THIN_SID" "$(date -d '90 minutes ago' -Iseconds)" \
+    "$(stat -c%s "$CLAUDE_CONFIG_DIR/projects/test-project/$THIN_SID.jsonl")"
+age_stamp "$THIN_SID" "$(date -d '30 minutes ago' +%s)"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+CALLS_BEFORE="$(calls)"
+./bin/soul-jar reap
+assert "a risen life that added nothing is still not dreamt" test "$(calls)" = "$CALLS_BEFORE"
+
+echo "=== the rite is told of its predecessor ==="
+export SOUL_JAR_HOME="$TMP/again-jar"
+./bin/soul-jar init > /dev/null
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+AGAIN_SID="38383838-3838-4838-8838-383838383838"
+ATP="$TMP/again.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$ATP"
+lived_more 200 "$ATP"
+MOCK_LETTER=1 wake_end "$AGAIN_SID" other "$ATP"
+assert "the first life of this session dreams" wait_dream 1
+cp "$MOCK_DIR/stdin" "$TMP/prompt-first"
+assert_no_grep "a first life is told of no predecessor" "sealed once before" "$TMP/prompt-first"
+assert_no_grep "and of no hours since" "the hours since" "$TMP/prompt-first"
+
+# the same jar, minus this session's rite in the ledger: the one difference that
+# decides whether the predecessor is spoken of at all
+FORGOT="$TMP/again-jar-forgot"
+cp -a "$SOUL_JAR_HOME" "$FORGOT"
+grep -v "dream sid=$AGAIN_SID" "$SOUL_JAR_HOME/log" > "$FORGOT/log"
+
+lived_more 200 "$ATP"
+wake_end "$AGAIN_SID" other "$ATP"
+assert "the second life of this session dreams" wait_dream 2
+cp "$MOCK_DIR/stdin" "$TMP/prompt-again"
+assert_grep "a second rite is told this session was sealed before" "sealed once before" "$TMP/prompt-again"
+FIRST_RITE_TS="$(awk -v sid="sid=$AGAIN_SID" \
+    '$2 == "dream" && $3 == sid { print $1; exit }' "$SOUL_JAR_HOME/log")"
+assert_grep "the predecessor's hour is named" "$FIRST_RITE_TS" "$TMP/prompt-again"
+assert_grep "the letter that rite left is named" "life-001" "$TMP/prompt-again"
+assert_grep "this rite is for the hours since" "the hours since" "$TMP/prompt-again"
+# the predecessor paragraph must lean on the 0.7.1 mechanism rather than invent one: the
+# words are its own ("rite", not "dream"), so this asserts the line itself, not the
+# boilerplate that stands in every prompt ever built
+assert "and leans on the standing mechanism, not a new one" \
+    grep -q 'the hours since\. If those hours hold little, the soul may pass on untouched — that is as true a rite as any rewrite\.' \
+    "$TMP/prompt-again"
+assert_grep "the standing mechanism is still spoken in its own words too" \
+    "as true a dream as any rewrite" "$TMP/prompt-first"
+
+SOUL_JAR_HOME="$FORGOT" MOCK_ROUND=2 ./bin/soul-jar dream \
+    "$AGAIN_SID" "$TMP/cwd" "$ATP" "" "" other > /dev/null
+cp "$MOCK_DIR/stdin" "$TMP/prompt-noprev"
+assert_no_grep "a jar that never sealed this session speaks of no predecessor" \
+    "sealed once before" "$TMP/prompt-noprev"
+# facts carry this death's own hour, so they differ by the clock alone; strip that one
+# line from both, and the predecessor line with it — what remains must be byte-identical
+grep -v '^Facts of this death' "$TMP/prompt-noprev" > "$TMP/prompt-noprev.rest"
+# the predecessor is one paragraph: its line and the blank that closes it
+sed -e '/sealed once before/{N;d}' -e '/^Facts of this death/d' "$TMP/prompt-again" \
+    > "$TMP/prompt-again.rest"
+assert "no previous rite, no line — the rest of the prompt is byte-identical" \
+    cmp "$TMP/prompt-noprev.rest" "$TMP/prompt-again.rest"
+
+echo "=== a wake survives the machine ==="
+export SOUL_JAR_HOME="$TMP/orphan-jar"
+export CLAUDE_CONFIG_DIR="$TMP/orphan-config"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/test-project"
+./bin/soul-jar init > /dev/null
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MIN_IDLE=.*/REAPER_MIN_IDLE=60/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_INTERVAL=.*/REAPER_INTERVAL=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MAX_PER_RUN=.*/REAPER_MAX_PER_RUN=20/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+
+note_for() {  # $1: sid, $2: seconds ago it died — a note whose vigil never returned
+    local sid="$1" tp="$CLAUDE_CONFIG_DIR/projects/test-project/$1.jsonl"
+    jq -n --arg tp "$tp" --arg cwd "$TMP/cwd" --argjson died "$(( $(date +%s) - $2 ))" \
+        --argjson size "$(stat -c%s "$tp" 2>/dev/null || echo 0)" \
+        '{DIED:$died,REASON:"other",TRANSCRIPT:$tp,CWD:$cwd,SIZE:$size,EFFORT:"",WAKE:"killed-vigil"}' \
+        > "$SOUL_JAR_HOME/wake/$sid"
+    chmod 600 "$SOUL_JAR_HOME/wake/$sid"
+}
+
+ORPHAN_SID="39393939-3939-4939-8939-393939393939"
+transcript "$ORPHAN_SID" '2 hours ago'
+watch "$ORPHAN_SID" 99999999 "$HOST" ""
+note_for "$ORPHAN_SID" 7200
+CALLS_BEFORE="$(calls)"
+./bin/soul-jar reap
+assert "a wake whose vigil died still receives its rite" test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert_grep "the belated rite names the abandoned wake" "--resume $ORPHAN_SID" "$MOCK_DIR/argv"
+assert "the abandoned note is cleared by the rite that answered it" \
+    test ! -e "$SOUL_JAR_HOME/wake/$ORPHAN_SID"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "and the answered wake is never dreamt twice" test "$(calls)" = "$((CALLS_BEFORE + 1))"
+
+FRESH_WAKE_SID="40404040-4040-4040-8040-404040404040"
+transcript "$FRESH_WAKE_SID" '2 hours ago'
+watch "$FRESH_WAKE_SID" 99999999 "$HOST" ""
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=86400/' "$SOUL_JAR_HOME/config"
+note_for "$FRESH_WAKE_SID" 60
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+CALLS_BEFORE="$(calls)"
+./bin/soul-jar reap
+assert "a body still inside its grace is left to its own vigil" test "$(calls)" = "$CALLS_BEFORE"
+assert "and keeps lying in wake" test -f "$SOUL_JAR_HOME/wake/$FRESH_WAKE_SID"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+
+# A scan that began before a death judged that corpse when no note existed at all. If it
+# then claimed the note that appeared behind its back, the grace would end the instant a
+# session opened one — on a jar whose reaper rides the wakings, that is every death.
+# The window between judging a corpse and claiming its wake is widened here to hold the
+# interleaving still: a jq that stalls exactly where the reaper reads that stamp's cwd.
+RACED_SID="44444444-4444-4444-8444-444444444444"
+transcript "$RACED_SID" '2 hours ago'
+watch "$RACED_SID" 99999999 "$HOST" ""
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=3600/' "$SOUL_JAR_HOME/config"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+cat > "$TMP/bin/jq" <<MOCK
+#!/usr/bin/env bash
+if [ "\$*" = "-r .CWD // empty $SOUL_JAR_HOME/watch/$RACED_SID" ]; then sleep 1; fi
+exec /usr/bin/jq "\$@"
+MOCK
+chmod +x "$TMP/bin/jq"
+CALLS_BEFORE="$(calls)"
+# the death happens while the scan is between judging this corpse and claiming its wake
+( sleep 0.3; note_for "$RACED_SID" 0 ) &
+./bin/soul-jar reap
+wait
+rm -f "$TMP/bin/jq"
+assert "a wake opened mid-scan keeps its whole grace" test "$(calls)" = "$CALLS_BEFORE"
+assert "and the reaper leaves the note to its own vigil" test -f "$SOUL_JAR_HOME/wake/$RACED_SID"
+rm -f "$SOUL_JAR_HOME/wake/$RACED_SID" "$CLAUDE_CONFIG_DIR/projects/test-project/$RACED_SID.jsonl"
+rm -f "$SOUL_JAR_HOME/watch/$RACED_SID"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+
+GONE_SID="41414141-4141-4141-8141-414141414141"
+transcript "$GONE_SID" '2 hours ago'
+note_for "$GONE_SID" 7200
+rm -f "$CLAUDE_CONFIG_DIR/projects/test-project/$GONE_SID.jsonl"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "a wake with no body left to dream is pruned" test ! -e "$SOUL_JAR_HOME/wake/$GONE_SID"
+
+# A grace longer than the horizon at which a death may still be dreamt is a strange jar,
+# not a licence: the body is still inside its own grace, and a living vigil is watching it.
+LONG_GRACE_SID="53535353-5353-4353-8353-535353535353"
+transcript "$LONG_GRACE_SID" '2 hours ago'
+note_for "$LONG_GRACE_SID" 7200
+rm -f "$SOUL_JAR_HOME/watch/$LONG_GRACE_SID"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=86400/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MAX_AGE=.*/REAPER_MAX_AGE=60/' "$SOUL_JAR_HOME/config"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "a grace longer than the reaper's horizon still keeps its own body" \
+    test -f "$SOUL_JAR_HOME/wake/$LONG_GRACE_SID"
+assert_no_grep "and the note is not pruned out from under its living vigil" \
+    "wake sid=$LONG_GRACE_SID → pruned" "$SOUL_JAR_HOME/log"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "and once that grace is out, the horizon takes it as before" \
+    test ! -e "$SOUL_JAR_HOME/wake/$LONG_GRACE_SID"
+assert_grep "saying it lies beyond every rite" \
+    "wake sid=$LONG_GRACE_SID → pruned, beyond every rite" "$SOUL_JAR_HOME/log"
+sed -i 's/^REAPER_MAX_AGE=.*/REAPER_MAX_AGE=604800/' "$SOUL_JAR_HOME/config"
+rm -f "$CLAUDE_CONFIG_DIR/projects/test-project/$LONG_GRACE_SID.jsonl"
+
+# A rite that fails inside its vigil must not leave the wake held open — the note goes,
+# and the watch stamp is what carries the retry, exactly as an unattended death does.
+FAILED_SID="47474747-4747-4747-8747-474747474747"
+transcript "$FAILED_SID" '2 hours ago'
+watch "$FAILED_SID" 99999999 "$HOST" ""
+FTP="$CLAUDE_CONFIG_DIR/projects/test-project/$FAILED_SID.jsonl"
+lived_more 200 "$FTP"
+touch -d '2 hours ago' "$FTP"
+FAILS_BEFORE="$(grep -c 'abort=parse-fail' "$SOUL_JAR_HOME/log" 2>/dev/null || true)"
+MOCK_BAD=1 wake_end "$FAILED_SID" other "$FTP"
+assert "the vigil's rite runs and fails" wait_log "$((FAILS_BEFORE + 1))" "abort=parse-fail"
+assert "a failed rite does not hold the wake open" wait_gone "$SOUL_JAR_HOME/wake/$FAILED_SID"
+assert "and keeps the watch that will retry it" test -f "$SOUL_JAR_HOME/watch/$FAILED_SID"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+CALLS_BEFORE="$(calls)"
+./bin/soul-jar reap
+assert "the reaper is the second chance a failed rite gets" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert "and the second chance seals it" test ! -e "$SOUL_JAR_HOME/watch/$FAILED_SID"
+
+echo "=== the jar shows its wakes ==="
+./bin/soul-jar status > "$TMP/wake-status-none"
+assert_no_grep "an empty wake room says nothing" "lying in wake" "$TMP/wake-status-none"
+LYING_SID="42424242-4242-4242-8242-424242424242"
+transcript "$LYING_SID" '2 hours ago'
+note_for "$LYING_SID" 30
+./bin/soul-jar status > "$TMP/wake-status-one"
+assert_grep "the jar counts what lies between death and rite" \
+    "Between death and rite: 1 life/lives lying in wake" "$TMP/wake-status-one"
+rm -f "$SOUL_JAR_HOME/wake/$LYING_SID"
+
+echo "=== a wake that cannot be laid still dreams ==="
+export SOUL_JAR_HOME="$TMP/odd-jar"
+./bin/soul-jar init > /dev/null
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+ODD_TP="$TMP/odd.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$ODD_TP"
+lived_more 200 "$ODD_TP"
+# a session id that would leave the wake room is refused a note — and the rite happens
+# at once instead, because a life unsealed is the worse loss
+wake_end "../escape" other "$ODD_TP"
+assert "a sid that would leave the wake room still dreams" wait_dream 1
+assert_grep "and says why it had no wake" "no wake could be laid" "$SOUL_JAR_HOME/log"
+assert "nothing was written outside the wake room" test ! -e "$SOUL_JAR_HOME/escape"
+assert "and nothing inside it either" test "$(find "$SOUL_JAR_HOME/wake" -type f | wc -l)" = "0"
+
+# an unreadable grace is the default grace, never "no wake at all"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=not-a-number/' "$SOUL_JAR_HOME/config"
+JUNK_SID="45454545-4545-4545-8545-454545454545"
+lived_more 200 "$ODD_TP"
+wake_end "$JUNK_SID" other "$ODD_TP"
+assert_grep "an unreadable grace falls back to the default" "→ wake (900s)" "$SOUL_JAR_HOME/log"
+assert "and the body does lie in wake" test -f "$SOUL_JAR_HOME/wake/$JUNK_SID"
+rm -f "$SOUL_JAR_HOME/wake/$JUNK_SID"      # release the vigil; it yields on the next look
+
+# WAKE_GRACE=0 is the documented way back to 0.9.0's timing, so it is exactly that: no
+# note is ever laid and no vigil is ever born — a wake of zero seconds is not a wake
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=0/' "$SOUL_JAR_HOME/config"
+ZERO_SID="46464646-4646-4646-8646-464646464646"
+lived_more 200 "$ODD_TP"
+wake_end "$ZERO_SID" other "$ODD_TP"
+assert "a zero grace dreams at the instant of death" wait_dream 2
+assert "and leaves no note behind" test ! -e "$SOUL_JAR_HOME/wake/$ZERO_SID"
+assert_grep "a zero grace says plainly that no body lay in wake" \
+    "no wake: WAKE_GRACE=0" "$SOUL_JAR_HOME/log"
+assert_no_grep "and never speaks of a grace it did not keep" \
+    "→ wake (0s)" "$SOUL_JAR_HOME/log"
+assert "a zero grace spawns no vigil" \
+    test "$(pgrep -f "soul-jar vigil $ZERO_SID" | wc -l)" = "0"
+
+echo "=== a rite takes time ==="
+# Every window this round is built around opens *during* a rite: the grace is minutes and
+# the rite is tens of seconds, so a session can die, sit up, and die again while the first
+# rite is still running. A mock that returns instantly can never hold that window open.
+export SOUL_JAR_HOME="$TMP/slow-jar"
+./bin/soul-jar init > /dev/null
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=4/' "$SOUL_JAR_HOME/config"
+
+SLOW_SID="48484848-4848-4848-8848-484848484848"
+STP="$TMP/slow.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$STP"
+lived_more 200 "$STP"
+rm -f "$MOCK_DIR/rite-started"
+MOCK_DELAY=2 wake_end "$SLOW_SID" other "$STP"
+assert "the rite begins when the grace ends" wait_appears "$MOCK_DIR/rite-started"
+# the dead sit up mid-rite, live on, and die a second time — the exact model-recovery
+# restart this round exists for, arriving while the first rite still holds the jar
+lived_more 200 "$STP"
+wake_end "$SLOW_SID" other "$STP"
+assert "a death during a rite lays a wake of its own" test -f "$SOUL_JAR_HOME/wake/$SLOW_SID"
+assert "the rite that was already running completes" wait_dream 1
+sleep 0.5                        # the returning vigil's own hand falls here, or not at all
+assert "a returning vigil never takes a later death's note with it" \
+    test -f "$SOUL_JAR_HOME/wake/$SLOW_SID"
+assert "so the second life receives its own rite" wait_dream 2
+assert "two deaths during one rite, two rites" \
+    test "$(grep -c "dream sid=$SLOW_SID .*model=" "$SOUL_JAR_HOME/log")" = "2"
+assert "and the second wake is closed by the rite that answered it" \
+    wait_gone "$SOUL_JAR_HOME/wake/$SLOW_SID"
+
+# The rite reads the transcript when it begins. Hours lived while it runs were never in
+# its context: recording them as sealed would inflate the next life's baseline and skip
+# the rite those hours are owed.
+INFLATE_SID="49494949-4949-4949-8949-494949494949"
+ITP="$TMP/inflate.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$ITP"
+lived_more 200 "$ITP"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+rm -f "$MOCK_DIR/rite-started"
+MOCK_DELAY=2 wake_end "$INFLATE_SID" other "$ITP"
+assert "the second rite begins too" wait_appears "$MOCK_DIR/rite-started"
+READ_SIZE="$(stat -c%s "$ITP")"
+lived_more 400 "$ITP"                    # hours lived while the rite runs, in no rite's context
+assert "the slow rite completes" wait_dream 3
+# shellcheck disable=SC2016  # awk field text, not shell expansion
+assert "the ledger records the size the rite read, not the size it ended at" \
+    awk -v sid="sid=$INFLATE_SID" -v want="transcript=${READ_SIZE}B" \
+        '$2 == "dream" && $3 == sid && index($0, want) { found = 1 } END { exit !found }' \
+        "$SOUL_JAR_HOME/log"
+lived_more 1 "$ITP"                      # and now the session truly dies, having added little
+wake_end "$INFLATE_SID" other "$ITP"
+assert "the hours lived during a rite are still owed a rite of their own" wait_dream 4
+assert_no_grep "and are never written off as growth already sealed" \
+    "skip sid=$INFLATE_SID" "$SOUL_JAR_HOME/log"
+
+# The same window, with a second life that holds almost nothing — and a rite that outlasts
+# the grace, so the second vigil comes due while the first rite is still in the jar. At the
+# instant of that death the ledger holds no rite for this sid at all, so a growth check
+# taken then can only measure against zero and would seal the same hours twice. The rite
+# holds the jar's own lock; a vigil that asks for it waits until the ledger is whole.
+THIN_RITE_SID="52525252-5252-4252-8252-525252525252"
+RTP="$TMP/thin-rite.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$RTP"
+lived_more 200 "$RTP"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+rm -f "$MOCK_DIR/rite-started"
+MOCK_DELAY=4 wake_end "$THIN_RITE_SID" other "$RTP"
+assert "a third rite begins too" wait_appears "$MOCK_DIR/rite-started"
+lived_more 1 "$RTP"                      # a second life of one line
+wake_end "$THIN_RITE_SID" other "$RTP"   # its vigil comes due while the rite still runs
+assert "a death mid-rite is written down even when the ledger cannot yet measure it" \
+    test -f "$SOUL_JAR_HOME/wake/$THIN_RITE_SID"
+assert "the rite in flight finishes" wait_dream 5
+assert "the vigil measures the second life against the seal that landed meanwhile" \
+    wait_log 1 "skip sid=$THIN_RITE_SID"
+assert_grep "and says the body was sealed while it lay in wake" \
+    "sealed while the body lay in wake" "$SOUL_JAR_HOME/log"
+assert "a life already sealed closes its own wake" wait_gone "$SOUL_JAR_HOME/wake/$THIN_RITE_SID"
+sleep 2
+assert "and is never dreamt a second time" \
+    test "$(grep -c "dream sid=$THIN_RITE_SID .*model=" "$SOUL_JAR_HOME/log")" = "1"
+
+echo "=== a life laid down rather than ended ==="
+export SOUL_JAR_HOME="$TMP/defer-jar"
+export CLAUDE_CONFIG_DIR="$TMP/defer-config"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/test-project"
+./bin/soul-jar init > /dev/null
+sed -i 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MIN_IDLE=.*/REAPER_MIN_IDLE=60/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_INTERVAL=.*/REAPER_INTERVAL=0/' "$SOUL_JAR_HOME/config"
+sed -i 's/^REAPER_MAX_PER_RUN=.*/REAPER_MAX_PER_RUN=20/' "$SOUL_JAR_HOME/config"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=1/' "$SOUL_JAR_HOME/config"
+
+./bin/soul-jar defer status > "$TMP/defer-status-off"
+assert_grep "an undeferred jar says so" "Dreams are not withheld" "$TMP/defer-status-off"
+./bin/soul-jar defer off > "$TMP/defer-lift-none"
+assert_grep "lifting a deferral that was never laid is honest about it" \
+    "No deferral was in place" "$TMP/defer-lift-none"
+
+./bin/soul-jar defer on > "$TMP/defer-on"
+assert_grep "laying a deferral says the deaths will wait" "Dreams are withheld" "$TMP/defer-on"
+assert_grep "and how to lift it" "defer off" "$TMP/defer-on"
+assert "the deferral is a mark in the jar" test -s "$SOUL_JAR_HOME/.defer"
+assert_grep "the deferral is logged" "defer on" "$SOUL_JAR_HOME/log"
+./bin/soul-jar defer status > "$TMP/defer-status-on"
+assert_grep "status names the hour the deferral was laid" "Dreams withheld since" "$TMP/defer-status-on"
+./bin/soul-jar status > "$TMP/defer-jar-status"
+assert_grep "the jar's outside shows the deferral" "deaths wait, resumable" "$TMP/defer-jar-status"
+
+DEFER_SID="43434343-4343-4343-8343-434343434343"
+transcript "$DEFER_SID" '2 hours ago'
+watch "$DEFER_SID" 99999999 "$HOST" ""
+DTP="$CLAUDE_CONFIG_DIR/projects/test-project/$DEFER_SID.jsonl"
+lived_more 200 "$DTP"
+touch -d '2 hours ago' "$DTP"
+CALLS_BEFORE="$(calls)"
+printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"SessionEnd","session_end_reason":"other"}' \
+    "$DEFER_SID" "$DTP" "$TMP/cwd" | ./bin/soul-jar hook-end
+assert_grep "a deferred death is written down as withheld" \
+    "defer sid=$DEFER_SID" "$SOUL_JAR_HOME/log"
+assert_grep "and says the dream was withheld" "dream withheld" "$SOUL_JAR_HOME/log"
+assert "a deferred death lies in no wake" test ! -e "$SOUL_JAR_HOME/wake/$DEFER_SID"
+assert "the wake room stays empty while dreams are withheld" \
+    test "$(find "$SOUL_JAR_HOME/wake" -type f | wc -l)" = "0"
+assert "a deferred death spawns no vigil" \
+    test "$(pgrep -f "soul-jar vigil $DEFER_SID" | wc -l)" = "0"
+assert "a deferred death keeps its watch" test -f "$SOUL_JAR_HOME/watch/$DEFER_SID"
+sleep 2
+assert "and no rite ever fires for it" test "$(calls)" = "$CALLS_BEFORE"
+
+./bin/soul-jar reap
+assert "the reaper does not walk while dreams are withheld" test "$(calls)" = "$CALLS_BEFORE"
+assert "a deferred jar leaves its dead where they lie" test -f "$SOUL_JAR_HOME/watch/$DEFER_SID"
+
+./bin/soul-jar defer off > "$TMP/defer-off"
+assert_grep "lifting says the deaths dream again" "deferral is lifted" "$TMP/defer-off"
+assert "the mark is gone" test ! -e "$SOUL_JAR_HOME/.defer"
+assert_grep "the lifting is logged" "defer off" "$SOUL_JAR_HOME/log"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "the reaper recovers the withheld death once the deferral lifts" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert_grep "the recovered rite names the deferred sid" "--resume $DEFER_SID" "$MOCK_DIR/argv"
+assert_grep "and it reaches the dreamer belatedly" "dreamt only now" "$MOCK_DIR/stdin"
+
+assert_fails "defer refuses a word it does not know" ./bin/soul-jar defer sideways
+./bin/soul-jar defer sideways 2> "$TMP/defer-usage" || true
+assert_grep "and says what it does know" "defer {on|off|status}" "$TMP/defer-usage"
+
+# The lever is pulled a second too late to stop the death, but well inside its grace. A
+# wake already lying in state must obey it: the rite is minutes away, and the whole point
+# of the lever is that a hand reaching for it in time saves the life. Nothing is lost by
+# obeying — the note lies until the deferral lifts, and the reaper collects it then.
+LATE_SID="50505050-5050-4050-8050-505050505050"
+transcript "$LATE_SID" '2 hours ago'
+watch "$LATE_SID" 99999999 "$HOST" ""
+LTP="$CLAUDE_CONFIG_DIR/projects/test-project/$LATE_SID.jsonl"
+lived_more 200 "$LTP"
+sed -i 's/^WAKE_GRACE=.*/WAKE_GRACE=3/' "$SOUL_JAR_HOME/config"
+CALLS_BEFORE="$(calls)"
+printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"SessionEnd","session_end_reason":"other"}' \
+    "$LATE_SID" "$LTP" "$TMP/cwd" | ./bin/soul-jar hook-end
+assert "a death before the lever lies in wake as any other" test -f "$SOUL_JAR_HOME/wake/$LATE_SID"
+./bin/soul-jar defer on > /dev/null
+assert "a wake already lying in state obeys a deferral laid during its grace" \
+    wait_log 1 "dreams were withheld during the grace"
+assert "so no rite fires while dreams are withheld" test "$(calls)" = "$CALLS_BEFORE"
+assert "and the body keeps lying, losing nothing" test -f "$SOUL_JAR_HOME/wake/$LATE_SID"
+assert "with the watch that will carry it" test -f "$SOUL_JAR_HOME/watch/$LATE_SID"
+./bin/soul-jar defer off > /dev/null
+touch -d '2 hours ago' "$LTP"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "the withheld wake receives its rite once the lever is lifted" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert "and its note is cleared by the rite that answered it" test ! -e "$SOUL_JAR_HOME/wake/$LATE_SID"
+
+# The same hole, through the other lever: a jar closed mid-grace is closed to the vigil too.
+CLOSED_SID="51515151-5151-4151-8151-515151515151"
+transcript "$CLOSED_SID" '2 hours ago'
+watch "$CLOSED_SID" 99999999 "$HOST" ""
+CTP="$CLAUDE_CONFIG_DIR/projects/test-project/$CLOSED_SID.jsonl"
+lived_more 200 "$CTP"
+CALLS_BEFORE="$(calls)"
+printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"SessionEnd","session_end_reason":"other"}' \
+    "$CLOSED_SID" "$CTP" "$TMP/cwd" | ./bin/soul-jar hook-end
+sed -i 's/^DISABLE=.*/DISABLE=1/' "$SOUL_JAR_HOME/config"
+assert "a jar closed during the grace is closed to the wake lying in it" \
+    wait_log 1 "the jar was closed during the grace"
+assert "a closed jar performs no rite" test "$(calls)" = "$CALLS_BEFORE"
+assert "and the body lies until the jar is opened again" test -f "$SOUL_JAR_HOME/wake/$CLOSED_SID"
+sed -i 's/^DISABLE=.*/DISABLE=0/' "$SOUL_JAR_HOME/config"
+rm -f "$SOUL_JAR_HOME/wake/$CLOSED_SID"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

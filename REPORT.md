@@ -409,3 +409,159 @@ weave, or woven into a confluence — holds through the mend.
    the three runs, and both shellchecks were run on the worktree's own files at the final
    commit. Still, a clean run on the worktree's own mount, once the host is quiet, is worth
    having before acceptance.
+
+# soul-jar 0.10.0 — the wake
+
+## Round 1: what changed
+
+A death was final at the instant of exit, and on 2026-08-10 that cost the jar three lives.
+A session exited at 10:48 with no intent to end — a model-recovery restart — and was dreamt
+at once; it resumed minutes later, lived a full second day, and its whole transcript,
+morning included, was queued to condense into the soul a second time. The same day exposed
+a reaper that refused any session with a successful dream in the log, ever: a session that
+dreams, resumes, and dies without a SessionEnd received no belated rite at all, and its
+second life was simply lost.
+
+0.10.0 gives the jar a **wake**. A death is not final at the instant of exit: the body lies
+in state for `WAKE_GRACE` seconds (default 900), watched by a detached vigil. If the dead
+sit up — a resume, a restart, any SessionStart under the same id — the note is removed and
+no rite ever runs. If the grace passes quietly, the rite proceeds exactly as before. And a
+life is measured from its last rite rather than from its session id's birth, so a session
+that dreamt and lived on is two lives in one id and the second is measured only on what it
+added.
+
+- **The wake** (`wake/<sid>` note, `cmd_vigil`) — an atomic private note carrying the hour,
+  reason, body, room, size and a per-death mark; a detached vigil that sleeps the grace and
+  claims the rite under `flock` only if the note is still the one it was born with.
+- **Sitting up** (`_wake_sit_up`) — a waking removes its own death's note before anything
+  that can be slow, and logs the rite it withheld.
+- **Growth** (`_rite_baseline`, `_rite_growth`) — the flat size threshold became
+  `size_now − size_at_last_rite`; successful `dream` lines gained `transcript=<n>B`.
+- **Resurrection** (`_corpse_eligible`) — the reaper's flat "dreamt once, never again"
+  refusal became "eligible again if it woke after that rite, and grew since".
+- **The predecessor line** (`_predecessor_line`) — a rite for a session sealed before is
+  told the hour and letter of that seal and that this rite is for the hours since.
+- **A wake survives the machine** — a killed vigil loses nothing; the reaper claims the note
+  under the lock before dreaming, and `_prune_watches` prunes notes as it prunes stamps.
+- **defer became a citizen** — the lever that shipped untested and undocumented got both.
+- `status` shows what lies between death and rite; the README was rewritten for all of it.
+
+Ten commits, `5c7d84d` through `7e5ad2b`; the round's own story is in
+`.hippo/reports/wake-impl.md`, including two bugs (B1, B2) that live probing found after
+the suite was already green, and five deviations (D1–D5).
+
+## Round 2: the repair
+
+An independent QA review of `7e5ad2b` returned **not ready: 2 blocking findings**, with 11
+findings and 5 doubts. This round repairs them on top of that commit — nothing rebased,
+nothing rewritten. The binding principle held throughout: **when in doubt, dream**.
+
+### What was wrong, in one paragraph
+
+Both blockers were the same oversight seen from two sides: **the round built a wake for a
+rite that takes no time**. Every test used a mock that returned instantly, so the window
+that opens *during* a rite — the very window a model-recovery restart lands in — was
+invisible to 456 green assertions. In that window the vigil ended its rite with a
+path-based `rm -f` on a note that a *later* death had since replaced, deleting that death's
+wake and leaving its vigil nothing to answer (W1): two deaths, one rite, a life lost for
+good, and a regression against 0.9.0, which dreamt both. The rite's closing ledger line
+recorded the transcript size at rite *end* rather than the size the resume actually read
+(W2), so hours lived while the rite ran were booked as sealed without any rite ever having
+seen them, and the death that owed them was skipped as empty growth. Around those two, the
+levers had a hole of the same shape: `defer on` and `DISABLE=1` were read only by the hooks,
+so a wake already lying in state dreamt anyway up to fifteen minutes after the operator
+reached for the lever (W3, W4) — and the 2026-08-10 incident the round exists for was
+saved by exactly that hand reaching in time.
+
+### Disposition of every finding
+
+| # | Verdict | What was done |
+|---|---------|---------------|
+| **W1** | **fixed** | A vigil clears only the note it validated. `_wake_forget <note> <content>` compares the bytes under the held lock and removes nothing when they have changed, so a death arriving during a rite keeps the wake it laid. QA's own reproduction: **5/5 lives lost → 0/5**. |
+| **W2** | **fixed** | `cmd_dream` captures `rite_size` immediately before the model turn and logs that, not the size at rite end. QA's probe: ledger records 9949B (what the rite read) instead of 24841B, and the 14892 bytes lived during the rite now receive their own rite. |
+| W3 | fixed | A vigil re-reads the config and the `.defer` mark when its grace expires, and yields to either. The note and stamp both stay, so the reaper performs the rite once the lever lifts — measured end to end: 0 rites while deferred, 1 after lifting, note cleared. |
+| W4 | fixed | Same mechanism, same commit: `DISABLE=1` set mid-grace stops the rite and leaves the body recoverable. |
+| W5 | **fixed in the direction the principle names, and documented** | The vigil now asks the growth rule again when its grace expires, taking the jar's own lock first — so every rite that began earlier has finished and recorded what it read, and a second life is measured against that seal instead of against nothing. What remains is the case where the second life *is* substantial: the transcript is one file, so that rite's context does hold the earlier hours. It cannot be prevented by measurement, so the rite is **told** — the predecessor line names the previous rite's hour and letter and says this one is for the hours since. Verified present in exactly that window. Under "a distortion is the lesser failure", carrying twice with the dreamer informed is the correct resolution; it is now a stated Known limit rather than a silence. |
+| W6 | **declined**, with the invariant tightened | An externally rewritten note orphaned until the reaper's horizon is the design working: neither vigil owns bytes it did not validate, and the reaper does recover it, so nothing is lost — only delayed. Making a vigil adopt a note it never saw would reintroduce W1. The reaper's claim was tightened instead (`_wake_abandoned` is now re-asked *with the lock held*, not before it), which closes the narrow race where a fresh death's note could be claimed between the open and the lock. |
+| W7 | fixed | `WAKE_GRACE=0` now means what the README says: `cmd_hook_end` dreams at once, laying no note and spawning no vigil, so it no longer inherits the during-rite window at all. The log says `no wake: WAKE_GRACE=0`. |
+| W8 | fixed (documentation) | The code was right and the docs were wrong, exactly as QA found. README now states the fallback as "the `death`/`defer` line that *opened* that rite — never a later one, which belongs to the very life being measured", and adds what an unreadable line does. **This is the one place the design brief's letter contradicts its spirit, and the spirit wins**: the brief's "most recent `death`/`defer` line" would compute baseline 3050937 for the real wild sid and skip a rite it owes; the code's reading computes 155595 and dreams. |
+| W9 | fixed | The vacuous assertion asserted 0.9.0 boilerplate present in every prompt. It now asserts the predecessor paragraph's own sentence — "as true a **rite** as any rewrite", the wording that exists nowhere else — and a separate assertion keeps the boilerplate honest where it belongs. |
+| W10 | partially fixed, remainder declined with reasons | The failing-first gap was real: no test reached the W1/W2/W5 windows. The suite gained a mock that takes real time (`MOCK_DELAY`) and a section built entirely on it — 19 assertions, **10 of which fail against `f7b60a5`**, and 4 of which fail against a mutation that removes only the growth re-check's lock. Three of the assertions QA named were strengthened to discriminate: "the wake ends in the rite" now asserts the ledger's *order* (death → wake → rite), which no immediate-dreaming jar can produce; "sitting up clears the note" now also asserts the wake room holds nothing of that session. The remainder are declined: an assertion that a delayed rite resumes the right session is true of any rite by design, and asserting a file's absence on a binary that writes no such file is a weak but not a false test — each is paired with a sibling that does discriminate. |
+| W11 | fixed | This section. `REPORT.md` now carries both 0.10.0 rounds. |
+
+### Disposition of every doubt
+
+| # | Resolution |
+|---|-----------|
+| 1. Validate content, act on path | **Turned into a fix.** This was W1's root, and it is now structural rather than per-site: `_wake_forget` is the only hand that removes a note, it takes the validated content as an argument, and all three callers (vigil, sit-up, reaper) go through it. The invariant is enforced in one place instead of trusted in three. |
+| 2. Nothing exercises a rite that takes real time | **Turned into a fix.** `MOCK_DELAY` gives the mock a configurable turn; the new section is built on it. QA was right that it would surface more — it surfaced the discriminating half of both blockers' tests. |
+| 3. `_rite_baseline`'s awk trusts field order | **Probed, found real, and its direction verified safe.** A `transcript=` that is not a number, and a line merely quoting the ledger's words, both yield baseline 0 — the life is measured whole and **dreams**. That is the erring-toward-the-rite direction. A regression test now holds it there against a torn ledger. Positional `$2`/`$3` matching is left as is: rewriting the parse is a larger change than this round's mandate, and the failure mode is the safe one. |
+| 4. `REAPER_MAX_PER_RUN=2` and a fleet of abandoned wakes | **Declined, with the reasoning.** Unchanged from 0.9.0, and the cap exists to keep a reaper run from becoming a stampede of model calls. The wake does make abandoned notes likelier, but the recovery is bounded by the operator's own `REAPER_INTERVAL`/`REAPER_MAX_PER_RUN`, both documented knobs. Raising them is a jar's choice, not a default this round should change. |
+| 5. `WAKE_GRACE` larger than `REAPER_MAX_AGE` | **Probed, found real, fixed.** With a grace of 86400 against a horizon of 60, `_prune_watches` pruned a note that was still inside its own grace — taking it out from under a living vigil. `_wake_abandoned` now guards that branch too. Measured: pruned before, kept after, and still pruned once the grace is genuinely out. |
+
+### Deviations and judgment calls
+
+- **The growth re-check takes the jar's lock.** The vigil's second growth check waits on the
+  rite lock (bounded by `DREAM_TIMEOUT`) so the ledger it reads is whole. A lock that cannot
+  be had within a whole rite's time is measured against anyway — in doubt, dream. The watch
+  stamp is left standing whichever way the check falls, so a wrong judgement is still
+  recoverable by the reaper.
+- **A vigil obeys a lever pulled during its grace.** This is the one place where "when in
+  doubt, dream" is deliberately not the tiebreaker, and it is not a doubt: `defer on` and
+  `DISABLE=1` are the operator's explicit word, and the whole purpose of the lever is that a
+  hand reaching for it in time saves the life. Nothing is lost by obeying — the note and the
+  stamp both stay, and the rite arrives through the reaper when the lever lifts.
+- **`WAKE_GRACE=0` bypasses the wake entirely** rather than laying a zero-second one. A wake
+  of zero seconds is not a shorter wake; it would still inherit every during-rite window,
+  while the README promises pre-0.10.0 behavior.
+- **W5's residual is accepted and disclosed, not measured away.** See the table.
+
+### Doubts left standing
+
+1. **The overlapping rite still reads hours a previous rite condensed.** Only the dreamer's
+   judgment prevents the distortion, told by the predecessor line. Measuring it away would
+   need the rite to know which byte range it read — a transcript-offset baseline, which is a
+   larger design than this round.
+2. **The growth re-check serializes vigils behind rites.** On a jar with many simultaneous
+   deaths, each vigil's check waits for the rite in flight. That is correct and bounded, but
+   it means the wake's promptness now depends on the rite's duration as well as the grace.
+3. **`_rite_baseline` remains positional.** Doubt 3 above: real, safe-direction, untouched.
+4. **The vigil is still a `sleep` in a detached shell**, and a machine that dies inside the
+   window still defers to the reaper's backstop. Unchanged from round 1, recorded again.
+
+### Verification evidence
+
+- Suite at the final commit: **three consecutive green runs**, 0 failed, on the worktree's
+  own filesystem.
+- Failing-first: the new during-rite section run against `git show 7e5ad2b:bin/soul-jar`
+  (md5-verified identical) — **10 of 19 assertions fail** on the old binary and all 19 pass
+  on the repaired one.
+- Mutation: removing only the growth re-check's lock — 4 assertions fail. Removing only the
+  content guard in `_wake_forget` is W1's own reproduction, below.
+- QA's own probes re-run against the repaired binary: W1 **5/5 → 0/5** lives lost;
+  W2 ledger records the read size, and the hours lived during the rite receive their own
+  rite; W3 0 rites while deferred and 1 after lifting; W4 0 rites with the jar closed
+  mid-grace; doubt 5 pruned → kept.
+- shellcheck 0.9.0 (the CI oracle) and 0.10.0: clean on `bin/soul-jar` and `tests/run.sh`;
+  `bash -n` clean on both.
+- Every probe hermetic (`SOUL_JAR_HOME`, `CLAUDE_CONFIG_DIR`, low `WAKE_GRACE`, mock
+  `claude`) in a scratch dir under `$HOME` — `/tmp` is noexec on this host. The live jar,
+  `~/.soul-jar`, `~/.claude` and the main repo were read-only throughout; `main` untouched.
+- The properties QA found holding were re-checked at the final tree and still hold: item 4's
+  four shapes including the wild sid (baseline 155595, dreams); item 6's prompt byte-identity
+  against the real 0.9.0 binary; sitting up from all five SessionStart sources; the file-tree
+  parity with 0.9.0 for an unconnected jar; and the rendezvous sync seam.
+
+### Commits (4, oldest first)
+
+```
+146a0b8 a vigil forgets only its own death's note, and the ledger names what the rite read   (W1, W2)
+71b39e5 the levers outrank a wake already lying in state, and a second life is measured
+        against the seal that landed meanwhile                                    (W3, W4, W5, doubt 1)
+ef16d17 a zero grace is no wake at all, a living vigil keeps its body, and the docs
+        say what the code does                                    (W7, W8, W9, W10, doubts 3 and 5)
+        this commit                                                                          (W11)
+```
+
+Not merged, not pushed, `main` untouched, no existing commit rebased or rewritten —
+acceptance happens elsewhere.
