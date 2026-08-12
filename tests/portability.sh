@@ -235,8 +235,8 @@ awk '
     /^}/ { fn = "" }
 ' "$SCRIPT" > "$VIOLATIONS"
 assert "GNU-only spellings occur only in portability helpers" test ! -s "$VIOLATIONS"
-assert "the plugin version is 0.10.1" \
-    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.1"
+assert "the plugin version is 0.10.2" \
+    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.2"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
