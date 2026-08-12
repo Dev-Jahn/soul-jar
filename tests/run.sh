@@ -28,6 +28,11 @@ epoch_ago() { printf '%s\n' "$(( $(date +%s) - $1 ))"; }
 iso_ago() { local e; e="$(epoch_ago "$1")"; date -d "@$e" -Iseconds 2>/dev/null || date -r "$e" +%Y-%m-%dT%H:%M:%S%z; }
 touch_ago() { local e; e="$(epoch_ago "$1")"; shift; touch -d "@$e" "$@" 2>/dev/null || touch -t "$(date -r "$e" +%Y%m%d%H%M.%S)" "$@"; }
 REAL_CP="$(PATH=/usr/bin:/bin type -P cp)"
+REAL_MV="$(PATH=/usr/bin:/bin type -P mv)"
+REAL_MKDIR="$(PATH=/usr/bin:/bin type -P mkdir)"
+REAL_RSYNC="$(PATH=/usr/bin:/bin type -P rsync)"
+REAL_JQ="$(type -P jq)"
+export REAL_CP REAL_MV REAL_MKDIR REAL_RSYNC REAL_JQ
 ok()   { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 assert()      { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
@@ -108,7 +113,7 @@ cat > "$TMP/bin/rsync" <<'MOCK'
 set -euo pipefail
 printf '%s\n' "$*" >> "$MOCK_DIR/rsync-calls"
 if [ -n "${RSYNC_HANG:-}" ]; then sleep "$RSYNC_HANG"; fi
-exec /usr/bin/rsync "$@"
+exec $REAL_RSYNC "$@"
 MOCK
 chmod +x "$TMP/bin/rsync"
 
@@ -135,7 +140,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.10.3" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.3"
+assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.4"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
 assert_grep "the wake room is in the files table" "wake/ " README.md
@@ -897,7 +902,7 @@ SOUL_JAR_HOME="$REL_A" ./bin/soul-jar sync
 SOUL_JAR_HOME="$REL_B" ./bin/soul-jar sync
 dream_now "$REL_A" 64                     # a confluence: its chain line gains merged=
 assert_grep "the confluence life is recorded as woven" "merged=" "$REL_A/chain"
-CONF_LIFE="$(wc -l < "$REL_A/chain")"
+CONF_LIFE="$(( $(wc -l < "$REL_A/chain") ))"
 assert "the confluence life left its relic" test -f "$REL_A/relics/life-$(printf '%03d' "$CONF_LIFE").sealed"
 sedi "s|^RENDEZVOUS=.*|RENDEZVOUS=$TMP/relic-gone|" "$REL_A/config"   # the room goes offline
 rm "$REL_A/soul.sealed"                                                # the jar shatters
@@ -920,7 +925,7 @@ if [ -n "${RSYNC_FAIL_ADDITIONS:-}" ]; then
         "$RSYNC_FAIL_ADDITIONS"/letters/|"$RSYNC_FAIL_ADDITIONS"/tributaries/) exit 23 ;;
     esac
 fi
-exec /usr/bin/rsync "$@"
+exec $REAL_RSYNC "$@"
 MOCK
 chmod +x "$TMP/bin/rsync"
 room_init "$STALE_A" ember
@@ -1235,7 +1240,7 @@ cat > "$TMP/bin/mv" <<MOCK
 #!/usr/bin/env bash
 last="\${!#}"
 if [ -n "\${MV_SLOW_CHAIN:-}" ] && [ "\$last" = "$TEAR_STREAM/chain" ]; then sleep 10; fi
-exec /usr/bin/mv "\$@"
+exec $REAL_MV "\$@"
 MOCK
 chmod +x "$TMP/bin/mv"
 room_init "$TEAR_A" ember
@@ -1329,7 +1334,7 @@ cat > "$TMP/bin/mkdir" <<MOCK
 if [ -n "\${MKDIR_WEDGE:-}" ]; then
     for a in "\$@"; do case "\$a" in "$WEDGE_STREAM"/*|"$WEDGE_STREAM") sleep 300 ;; esac; done
 fi
-exec /usr/bin/mkdir "\$@"
+exec $REAL_MKDIR "\$@"
 MOCK
 chmod +x "$TMP/bin/mkdir"
 START_NS="$(date +%s%N)"
@@ -1633,7 +1638,7 @@ assert_no_grep "a jar that never sealed this session speaks of no predecessor" \
 # line from both, and the predecessor line with it — what remains must be byte-identical
 grep -v '^Facts of this death' "$TMP/prompt-noprev" > "$TMP/prompt-noprev.rest"
 # the predecessor is one paragraph: its line and the blank that closes it
-sed -e '/sealed once before/{N;d}' -e '/^Facts of this death/d' "$TMP/prompt-again" \
+sed -e '/sealed once before/{N;d;}' -e '/^Facts of this death/d' "$TMP/prompt-again" \
     > "$TMP/prompt-again.rest"
 assert "no previous rite, no line — the rest of the prompt is byte-identical" \
     cmp "$TMP/prompt-noprev.rest" "$TMP/prompt-again.rest"
@@ -1697,7 +1702,7 @@ rm -f "$SOUL_JAR_HOME/.reap.stamp"
 cat > "$TMP/bin/jq" <<MOCK
 #!/usr/bin/env bash
 if [ "\$*" = "-r .CWD // empty $SOUL_JAR_HOME/watch/$RACED_SID" ]; then sleep 1; fi
-exec /usr/bin/jq "\$@"
+exec $REAL_JQ "\$@"
 MOCK
 chmod +x "$TMP/bin/jq"
 CALLS_BEFORE="$(calls)"

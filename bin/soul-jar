@@ -801,7 +801,9 @@ _chain_prefix() {  # $1 is a byte-prefix of $2
     psize="$(_fsize "$prefix" 2>/dev/null || echo 0)"
     wsize="$(_fsize "$whole" 2>/dev/null || echo 0)"
     [ "$psize" -le "$wsize" ] || return 1
-    [ "$psize" -eq 0 ] || cmp -n "$psize" "$prefix" "$whole" >/dev/null 2>&1
+    # cmp -n is GNU-only; head -c speaks both dialects. On BSD the old spelling
+    # errored, every death read as diverged, and each one lay down as a tributary.
+    [ "$psize" -eq 0 ] || head -c "$psize" "$whole" 2>/dev/null | cmp -s "$prefix" - >/dev/null 2>&1
 }
 
 _remove_tributaries() {  # $1: comma-separated ids
@@ -2306,7 +2308,7 @@ cmd_status() {
     [ -n "$nbed" ] && [ "$nbed" -gt 0 ] && printf '   At the bedside: %s line(s) laid by the living, waiting for the next dream\n' "$nbed"
     [ -s "$JAR/whisper" ] && printf '   Whisper at the surface: "%s"\n' "$(cat "$JAR/whisper")"
     [ -f "$JAR/.defer" ] && printf '   Dreams withheld since %s — deaths wait, resumable\n' "$(cat "$JAR/.defer")"
-    nwake="$(_wake_notes | wc -l)"
+    nwake="$(( $(_wake_notes | wc -l) ))"
     [ "$nwake" -gt 0 ] && printf '   Between death and rite: %s life/lives lying in wake\n' "$nwake"
     corpses="$(_eligible_count "$(date +%s)")"
     [ "$corpses" -gt 0 ] && printf '   Awaiting belated rites: %s unattended dead\n' "$corpses"
@@ -2315,7 +2317,7 @@ cmd_status() {
         if [ -f "$JAR/.sync/last" ]; then
             last_sync="$(_epoch_to_iso "$(cat "$JAR/.sync/last")" 2>/dev/null || printf unknown)"
         fi
-        [ -d "$JAR/tributaries" ] && waiting="$(find "$JAR/tributaries" -mindepth 1 -maxdepth 1 -type f -name '*.sealed' | wc -l)"
+        [ -d "$JAR/tributaries" ] && waiting="$(( $(find "$JAR/tributaries" -mindepth 1 -maxdepth 1 -type f -name '*.sealed' | wc -l) ))"
         printf '   Room: %s\n' "$ROOM"
         printf '   Rendezvous: %s\n' "$RENDEZVOUS"
         printf '   Last sync: %s\n' "$last_sync"

@@ -235,8 +235,8 @@ awk '
     /^}/ { fn = "" }
 ' "$SCRIPT" > "$VIOLATIONS"
 assert "GNU-only spellings occur only in portability helpers" test ! -s "$VIOLATIONS"
-assert "the plugin version is 0.10.3" \
-    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.3"
+assert "the plugin version is 0.10.4" \
+    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.4"
 
 echo "=== P7: no heredoc inside command substitution ==="
 HEREDOC_SUB_VIOLATIONS="$TMP/heredoc-substitution-violations"
