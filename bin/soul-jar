@@ -3,8 +3,22 @@
 # The jar is opened only at the rite of death (SessionEnd → posthumous resume).
 set -euo pipefail
 
+_self_path() {  # stdout: physical absolute path of this script, following symlinks
+    local source="${BASH_SOURCE[0]}" dir link
+    case "$source" in /*) : ;; *) source="$PWD/$source" ;; esac
+    while [ -h "$source" ]; do
+        dir="${source%/*}"
+        dir="$(cd -P "$dir" && pwd)" || return 1
+        link="$(readlink "$source")" || return 1
+        case "$link" in /*) source="$link" ;; *) source="$dir/$link" ;; esac
+    done
+    dir="${source%/*}"
+    dir="$(cd -P "$dir" && pwd)" || return 1
+    printf '%s/%s\n' "$dir" "${source##*/}"
+}
+
 JAR="${SOUL_JAR_HOME:-$HOME/.soul-jar}"
-SELF="$(readlink -f "$0")"
+SELF="$(_self_path)"
 
 # -------- config defaults (overridable in $JAR/config, KEY=VALUE lines) --------
 MIN_TRANSCRIPT_BYTES=150000   # sessions that lived shorter than this do not dream
@@ -32,11 +46,207 @@ RENDEZVOUS_LETTER_KEEP=20     # newest letters the rendezvous carries; rooms kee
 _load_config() {
     # shellcheck disable=SC1090,SC1091
     if [ -f "$JAR/config" ]; then . "$JAR/config"; fi
+    _require_runtime
 }
 
-_log() { printf '%s %s\n' "$(date -Iseconds)" "$*" >> "$JAR/log"; }
+_iso_now() { date +%Y-%m-%dT%H:%M:%S%z; }
+
+_log() { printf '%s %s\n' "$(_iso_now)" "$*" >> "$JAR/log"; }
 
 _die() { printf 'soul-jar: %s\n' "$*" >&2; exit 1; }
+
+SHA256_MODE=""; STAT_MODE=""; DATE_MODE=""; FLOCK_MODE=""; DETACH_MODE=""; RUNTIME_READY=0
+
+_sha256_mode() {
+    [ -z "$SHA256_MODE" ] || return 0
+    if command -v sha256sum >/dev/null 2>&1; then SHA256_MODE=gnu
+    elif command -v shasum >/dev/null 2>&1; then SHA256_MODE=bsd
+    else return 1
+    fi
+}
+
+_sha256() {  # args as for sha256sum/shasum; stdout: lowercase hex only
+    _sha256_mode || { printf 'soul-jar: sha256sum or shasum: command not found\n' >&2; return 127; }
+    if [ "$SHA256_MODE" = gnu ]; then sha256sum "$@" | awk '{print $1}'
+    else shasum -a 256 "$@" | awk '{print $1}'
+    fi
+}
+
+_stat_mode() {
+    [ -z "$STAT_MODE" ] || return 0
+    if stat -c%s "$SELF" >/dev/null 2>&1; then STAT_MODE=gnu
+    elif stat -f%z "$SELF" >/dev/null 2>&1; then STAT_MODE=bsd
+    else return 1
+    fi
+}
+
+_fsize() {
+    _stat_mode || { printf 'soul-jar: stat: no supported file-size format\n' >&2; return 1; }
+    if [ "$STAT_MODE" = gnu ]; then stat -c%s "$1"; else stat -f%z "$1"; fi
+}
+
+_fmtime() {
+    _stat_mode || { printf 'soul-jar: stat: no supported mtime format\n' >&2; return 1; }
+    if [ "$STAT_MODE" = gnu ]; then stat -c%Y "$1"; else stat -f%m "$1"; fi
+}
+
+_fmtime_key() {  # sortable epoch+nanos on GNU, epoch+zero nanos on BSD
+    local line epoch fraction
+    _stat_mode || { printf 'soul-jar: stat: no supported mtime format\n' >&2; return 1; }
+    if [ "$STAT_MODE" = gnu ]; then
+        line="$(stat -c '%Y.%y' "$1")" || return 1
+        epoch="${line%%.*}"; fraction="${line##*.}"; fraction="${fraction%% *}"
+    else
+        epoch="$(stat -f%m "$1")" || return 1
+        fraction=000000000
+    fi
+    printf '%012d%.9s\n' "$epoch" "${fraction}000000000"
+}
+
+_date_mode() {
+    [ -z "$DATE_MODE" ] || return 0
+    if date -d "@0" +%s >/dev/null 2>&1; then DATE_MODE=gnu
+    elif date -r 0 +%s >/dev/null 2>&1; then DATE_MODE=bsd
+    else return 1
+    fi
+}
+
+_epoch_to_iso() {
+    _date_mode || { printf 'soul-jar: date: cannot render an epoch\n' >&2; return 1; }
+    if [ "$DATE_MODE" = gnu ]; then date -d "@$1" +%Y-%m-%dT%H:%M:%S%z
+    else date -r "$1" +%Y-%m-%dT%H:%M:%S%z
+    fi
+}
+
+_iso_to_epoch() {
+    local value="$1"
+    _date_mode || { printf 'soul-jar: date: cannot parse an ISO timestamp\n' >&2; return 1; }
+    if [ "$DATE_MODE" = gnu ]; then
+        date -d "$value" +%s
+    else
+        # BSD strptime accepts +hhmm; normalize chain entries written earlier as +hh:mm.
+        if [[ "$value" =~ ^(.*)([+-][0-9][0-9]):([0-9][0-9])$ ]]; then
+            value="${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+        fi
+        date -j -f '%Y-%m-%dT%H:%M:%S%z' "$value" +%s
+    fi
+}
+
+_flock_mode() {
+    [ -z "$FLOCK_MODE" ] || return 0
+    if command -v flock >/dev/null 2>&1; then FLOCK_MODE=command
+    elif command -v perl >/dev/null 2>&1 \
+         && perl -MFcntl=:flock -e 'exit 0' >/dev/null 2>&1; then FLOCK_MODE=perl
+    else return 1
+    fi
+}
+
+_flock() {  # supported forms: -n fd, -w seconds fd
+    local kind="${1:-}" wait=0 fd
+    _flock_mode || { printf 'soul-jar: flock or perl Fcntl: command not found\n' >&2; return 127; }
+    if [ "$FLOCK_MODE" = command ]; then flock "$@"; return; fi
+    case "$kind" in
+        -n) fd="${2:-}" ;;
+        -w) wait="${2:-}"; fd="${3:-}" ;;
+        *) printf 'soul-jar: unsupported lock form: %s\n' "$kind" >&2; return 2 ;;
+    esac
+    perl -MFcntl=:flock -e '
+        my ($kind, $wait, $fd) = @ARGV;
+        open(my $fh, "+<&=$fd") or exit 2;
+        if ($kind eq "-n" || $wait == 0) { exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1); }
+        local $SIG{ALRM} = sub { exit 1 };
+        alarm($wait);
+        my $locked = flock($fh, LOCK_EX);
+        alarm(0);
+        exit($locked ? 0 : 1);
+    ' -- "$kind" "$wait" "$fd"
+}
+
+_detach_mode() {
+    [ -z "$DETACH_MODE" ] || return 0
+    if command -v setsid >/dev/null 2>&1; then DETACH_MODE=command
+    elif command -v perl >/dev/null 2>&1 \
+         && perl -MPOSIX -e 'exit 0' >/dev/null 2>&1; then DETACH_MODE=perl
+    else return 1
+    fi
+}
+
+_run_detached() {  # remaining args: command; caller supplies redirections and final &
+    _detach_mode || { printf 'soul-jar: setsid or perl POSIX: command not found\n' >&2; return 127; }
+    if [ "$DETACH_MODE" = command ]; then exec setsid nohup "$@"
+    else
+        exec perl -MPOSIX -e '
+            defined POSIX::setsid() or die "setsid: $!\n";
+            exec @ARGV or die "exec $ARGV[0]: $!\n";
+        ' -- nohup "$@"
+    fi
+}
+
+_require_runtime() {
+    local cmd missing=""
+    [ "$RUNTIME_READY" = 0 ] || return 0
+    for cmd in ssh rsync openssl; do
+        command -v "$cmd" >/dev/null 2>&1 || missing="${missing}${missing:+, }$cmd"
+    done
+    _sha256_mode || missing="${missing}${missing:+, }sha256sum or shasum"
+    _stat_mode || missing="${missing}${missing:+, }compatible stat"
+    _date_mode || missing="${missing}${missing:+, }compatible date"
+    _flock_mode || missing="${missing}${missing:+, }flock or perl Fcntl"
+    _detach_mode || missing="${missing}${missing:+, }setsid or perl POSIX"
+    [ -z "$missing" ] || _die "missing required command(s): $missing; install them and ensure they are on PATH (macOS: xcode-select --install; Homebrew: brew install rsync openssl)"
+    RUNTIME_READY=1
+}
+
+_with_deadline() {  # $1: seconds; remaining args: command; stdin is passed through
+    local cap="$1"
+    shift
+    [[ "$cap" =~ ^[0-9]+$ ]] \
+        || { printf 'soul-jar: invalid deadline: %s\n' "$cap" >&2; return 125; }
+    [ "$#" -gt 0 ] || { printf 'soul-jar: deadline requires a command\n' >&2; return 127; }
+    command -v "$1" >/dev/null 2>&1 \
+        || { printf 'soul-jar: %s: command not found\n' "$1" >&2; return 127; }
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 1 "$cap" "$@"
+        return
+    fi
+    if [ "$cap" -eq 0 ]; then "$@"; return; fi
+
+    (
+        local command_pid watcher_pid supervisor_pid="$BASHPID" timed_out=0 rc=0
+        # Monitor mode gives the command its own process group. fd 5 prevents Bash from
+        # replacing an asynchronous command's stdin with /dev/null, preserving heredocs.
+        trap 'timed_out=1' USR1
+        set -m
+        exec 5<&0
+        "$@" <&5 &
+        command_pid=$!
+        exec 5<&-
+        (
+            # A deadline watcher must never prolong locks held by its caller.
+            exec 6>&- 7>&- 8>&- 9>&-
+            sleep "$cap"
+            kill -0 -- "-$command_pid" 2>/dev/null || exit 0
+            kill -USR1 "$supervisor_pid"
+            kill -TERM -- "-$command_pid" 2>/dev/null || exit 0
+            ( sleep 1; kill -KILL -- "-$command_pid" 2>/dev/null || true ) &
+            exit 124
+        ) &
+        watcher_pid=$!
+        set +m
+
+        wait "$command_pid" || rc=$?
+        while [ "$timed_out" = 1 ] && kill -0 "$command_pid" 2>/dev/null; do
+            wait "$command_pid" 2>/dev/null || rc=$?
+        done
+        if [ "$timed_out" = 1 ]; then
+            wait "$watcher_pid" 2>/dev/null || true
+            exit 124
+        fi
+        kill -TERM -- "-$watcher_pid" 2>/dev/null || true
+        wait "$watcher_pid" 2>/dev/null || true
+        exit "$rc"
+    )
+}
 
 _proc_stat() {  # $1: pid; stdout: parent pid, starttime
     local line rest
@@ -67,7 +277,7 @@ _claude_ancestor() {  # stdout: pid, starttime
     return 1
 }
 
-_mac_key() { printf '%smac' "$(cat "$JAR/.key")" | sha256sum | cut -d' ' -f1; }
+_mac_key() { printf '%smac' "$(cat "$JAR/.key")" | _sha256; }
 
 # -------- init: shape the jar (idempotent) --------
 cmd_init() {
@@ -80,7 +290,7 @@ cmd_init() {
         umask 077
         openssl rand -hex 32 > "$JAR/.key"
     fi
-    [ -f "$JAR/born" ] || date -Iseconds > "$JAR/born"
+    [ -f "$JAR/born" ] || _iso_now > "$JAR/born"
     [ -f "$JAR/chain" ] || : > "$JAR/chain"
     [ -f "$JAR/log" ] || : > "$JAR/log"
     if [ ! -f "$JAR/config" ]; then
@@ -163,9 +373,9 @@ _rv_child() {  # $1: child path
 _rsync_bounded() {  # $1: cap, remaining args: rsync argv
     local cap="$1"; shift
     if [ "$RV_KIND" = "remote" ]; then
-        timeout -k 1 "$cap" rsync -e "ssh -o BatchMode=yes -o ConnectTimeout=$SYNC_CONNECT_TIMEOUT" "$@"
+        _with_deadline "$cap" rsync -e "ssh -o BatchMode=yes -o ConnectTimeout=$SYNC_CONNECT_TIMEOUT" "$@"
     else
-        timeout -k 1 "$cap" rsync "$@"
+        _with_deadline "$cap" rsync "$@"
     fi
 }
 
@@ -184,13 +394,15 @@ _rv_sweep_stages() {  # $1: cap — called with the lock held
     if [ "$RV_KIND" = "local" ]; then
         output="$(find "$RV_PATH" -mindepth 1 -maxdepth 1 -mmin "+$mins" \
             \( -name '.stage.*' -o -name '.chain.*' -o -name '.soul.*' -o -name '.whisp.*' \
-               -o -name '.lock.stale.*' \) -printf '%f\n' 2>/dev/null || true)"
+               -o -name '.lock.stale.*' \) -print 2>/dev/null \
+            | while IFS= read -r path; do printf '%s\n' "${path##*/}"; done || true)"
         while IFS= read -r name; do
             [ -n "$name" ] || continue
             rm -rf -- "${RV_PATH:?}/$name" && _log "sync room=$ROOM swept=$name"
         done <<< "$output"
     else
-        output="$(timeout -k 1 "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+        # These heredocs execute on the Linux rendezvous; their bodies stay POSIX sh.
+        output="$(_with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
             "$RV_HOST" sh -s -- "$RV_PATH" "$mins" <<'SH' 2>/dev/null || true
 root=$1 mins=$2
 find "$root" -maxdepth 1 -mmin "+$mins" \
@@ -226,7 +438,7 @@ _rv_lock() {  # $1: cap
         printf '%s\n' "$ROOM" > "$RV_PATH/.lock/room"
         printf '%s\n' "$now" > "$RV_PATH/.lock/stamp"
     else
-        output="$(timeout -k 1 "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+        output="$(_with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
             "$RV_HOST" sh -s -- "$RV_PATH" "$ROOM" "$now" "$SYNC_LOCK_STALE" "$$" <<'SH'
 root=$1 room=$2 now=$3 stale=$4 pid=$5
 [ -d "$root" ] || exit 1
@@ -260,7 +472,7 @@ _rv_unlock() {  # $1: cap
             rmdir "$RV_PATH/.lock" 2>/dev/null || true
         fi
     else
-        timeout -k 1 "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+        _with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
             "$RV_HOST" sh -s -- "$RV_PATH" "$ROOM" <<'SH' >/dev/null 2>&1 || true
 root=$1 room=$2
 [ "$(cat "$root/.lock/room" 2>/dev/null)" = "$room" ] || exit 0
@@ -388,8 +600,8 @@ _merge_stream_additions() {  # $1: fetched prefix; never touches the local seal 
         for file in "$stage"/.whisper.heard.*; do
             [ -f "$file" ] || continue
             local_file="$JAR/${file##*/}"
-            remote_size="$(stat -c%s "$file" 2>/dev/null || echo 0)"
-            local_size="$(stat -c%s "$local_file" 2>/dev/null || echo 0)"
+            remote_size="$(_fsize "$file" 2>/dev/null || echo 0)"
+            local_size="$(_fsize "$local_file" 2>/dev/null || echo 0)"
             [ "$remote_size" -gt "$local_size" ] && cp -p "$file" "$local_file"
         done
     fi
@@ -442,7 +654,7 @@ _finalize_local_push() {  # $1: remote stage name
 
 _finalize_remote_push() {  # $1: cap, $2: remote stage name
     local cap="$1" name="$2"
-    timeout -k 1 "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+    _with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
         "$RV_HOST" sh -s -- "$RV_PATH" "$name" "$ROOM" <<'SH'
 root=$1 name=$2 room=$3 stage=$1/$2
 tmp_chain="$root/.chain.$room.$$"
@@ -490,7 +702,7 @@ _discard_stage() {  # $1: cap, $2: remote stage name — a refused push leaves n
         rm -rf -- "${RV_PATH:?}/$name"
         rm -f -- "$RV_PATH/.chain.$ROOM.$$" "$RV_PATH/.soul.$ROOM.$$" "$RV_PATH/.whisp.$ROOM.$$"
     else
-        timeout -k 1 "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+        _with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
             "$RV_HOST" sh -s -- "$RV_PATH" "$name" "$ROOM" "$$" <<'SH' >/dev/null 2>&1 || true
 root=$1 name=$2 room=$3 pid=$4
 case "$name" in .stage.*) rm -rf -- "$root/$name" ;; esac
@@ -533,8 +745,8 @@ _push_mainline() {  # called under rendezvous lock; $1: cap
 
 _chain_prefix() {  # $1 is a byte-prefix of $2
     local prefix="$1" whole="$2" psize wsize
-    psize="$(stat -c%s "$prefix" 2>/dev/null || echo 0)"
-    wsize="$(stat -c%s "$whole" 2>/dev/null || echo 0)"
+    psize="$(_fsize "$prefix" 2>/dev/null || echo 0)"
+    wsize="$(_fsize "$whole" 2>/dev/null || echo 0)"
     [ "$psize" -le "$wsize" ] || return 1
     [ "$psize" -eq 0 ] || cmp -n "$psize" "$prefix" "$whole" >/dev/null 2>&1
 }
@@ -584,12 +796,15 @@ _push_additions() {  # called under lock; $1: cap, $2: include this room's heard
 # have the sync that publishes such a letter prune it in the same breath, so it would
 # reach no other room at all. Life number breaks ties, so the order stays stable.
 _letters_by_life() {  # $1: letters dir; stdout: names, oldest written first
-    find "$1" -mindepth 1 -maxdepth 1 -type f -printf '%T@\t%f\n' 2>/dev/null \
-        | awk -F'\t' '{ split($1, when, ".")
-                        life = $2; sub(/^life-/, "", life); sub(/\..*$/, "", life)
-                        printf "%012d%s%012d\t%s\n", when[1] + 0,
-                               substr(when[2] "000000000", 1, 9), life + 0, $2 }' \
-        | sort | cut -f2-
+    local file name life when
+    for file in "$1"/*; do
+        [ -f "$file" ] || continue
+        name="${file##*/}"
+        life="${name#life-}"; life="${life%%.*}"
+        [[ "$life" =~ ^[0-9]+$ ]] || life=0
+        when="$(_fmtime_key "$file" 2>/dev/null)" || continue
+        printf '%s%012d\t%s\n' "$when" "$((10#$life))" "$name"
+    done | sort | cut -f2-
 }
 
 _letters_beyond_keep() {  # $1: letters dir, $2: keep; stdout: names to forget, oldest first
@@ -625,7 +840,7 @@ _prune_rendezvous_letters() {  # $1: cap — under the lock, after letters have 
             rm -f -- "$RV_PATH/letters/$name" && _log "sync room=$ROOM pruned=$name"
         done <<< "$output"
     else
-        output="$(timeout -k 1 "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+        output="$(_with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
             "$RV_HOST" sh -s -- "$RV_PATH" "$keep" <<'SH' 2>/dev/null || true
 root=$1 keep=$2
 dir="$root/letters"
@@ -708,9 +923,9 @@ _make_pending_tributary() {
     done
     sealed="$JAR/tributaries/$id.sealed"
     cp -p "$JAR/soul.sealed" "$sealed"
-    ch="$(sha256sum "$sealed" | cut -d' ' -f1)"
+    ch="$(_sha256 "$sealed")"
     mac="$(printf '%s%s' "$parent" "$ch" | openssl dgst -sha256 -hmac "$(_mac_key)" -r | cut -d' ' -f1)"
-    ts="$(date -Iseconds)"
+    ts="$(_iso_now)"
     jq -n --arg room "$ROOM" --arg ts "$ts" --arg parent "$parent" --arg mac "$mac" \
         --arg consumed "$consumed" \
         '{room:$room,ts:$ts,parent_mac:$parent,mac:$mac,
@@ -877,7 +1092,8 @@ _sync_sweep_local() {
     output="$(find "$JAR/.sync" -mindepth 1 -maxdepth 1 -mmin "+$mins" \
         \( -name 'fetch.*' -o -name 'push.*' -o -name 'enroll.*' -o -name '.adopt.*' \
            -o -name '.letters.*' -o -name '.trib.*' -o -name '.pending.*' \) \
-        -printf '%f\n' 2>/dev/null || true)"
+        -print 2>/dev/null \
+        | while IFS= read -r path; do printf '%s\n' "${path##*/}"; done || true)"
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         rm -rf -- "${JAR:?}/.sync/$name" && _log "sync room=$ROOM swept=$name"
@@ -894,7 +1110,7 @@ _sync_reconcile() {  # $1: per-operation cap
     _sync_enabled || return 0
     _sync_init
     exec 7> "$JAR/.sync/lock"
-    flock -n 7 || return 0
+    _flock -n 7 || return 0
     _sync_sweep_local || true
     if [ -f "$JAR/.sync/pending" ]; then _sync_guarded _resolve_pending "$cap" || rc=$?
     else _sync_guarded _sync_regular "$cap" || rc=$?
@@ -920,7 +1136,7 @@ _sync_reconcile_capped() {
     # A child killed at its cap never reached its own bookkeeping, so the mark is laid
     # here instead; a child that crossed cleanly has already cleared it. The mark, not
     # the child's status, is what the exterior and the caller read.
-    timeout -k 1 "$(_sync_whole_cap)" "$SELF" _sync-death >/dev/null 2>&1 || _sync_unreached
+    _with_deadline "$(_sync_whole_cap)" "$SELF" _sync-death >/dev/null 2>&1 || _sync_unreached
     [ ! -f "$JAR/.sync/unreached" ]
 }
 
@@ -938,13 +1154,25 @@ _sync_if_due() {  # $1: per-operation cap
 
 # -------- seal / unseal / verify --------
 # Plaintext exists only inside the rite's pipes.
+_relics_by_life() {  # $1: oldest|newest; stdout: full paths in numeric life order
+    local order="$1" file base digits
+    for file in "$JAR/relics"/life-*.sealed; do
+        [ -f "$file" ] || continue
+        base="${file##*/}"
+        [[ "$base" =~ ^life-([0-9]+)\.sealed$ ]] || continue
+        digits="${BASH_REMATCH[1]}"
+        printf '%012d\t%s\n' "$((10#$digits))" "$file"
+    done | if [ "$order" = newest ]; then sort -nr; else sort -n; fi | cut -f2-
+}
+
 _prune_relics() {
-    local -a relics
-    mapfile -t relics < <(find "$JAR/relics" -mindepth 1 -maxdepth 1 -type f \
-        -name 'life-*.sealed' -printf '%f\n' | sort -V)
-    while [ "${#relics[@]}" -gt "$RELIC_KEEP" ]; do
-        rm -f -- "$JAR/relics/${relics[0]}"
-        relics=("${relics[@]:1}")
+    local total relic
+    total="$(_relics_by_life oldest | wc -l)"
+    while [ "$total" -gt "$RELIC_KEEP" ]; do
+        relic="$(_relics_by_life oldest | head -n1)"
+        [ -n "$relic" ] || return 1
+        rm -f -- "$relic"
+        total=$((total - 1))
     done
 }
 
@@ -953,7 +1181,7 @@ _seal() {  # stdin: new soul plaintext; $1: woven tributary ids (optional)
     tmp="$(mktemp "$JAR/.seal.XXXXXX")"
     openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt \
         -pass "file:$JAR/.key" -out "$tmp"
-    ch="$(sha256sum "$tmp" | cut -d' ' -f1)"
+    ch="$(_sha256 "$tmp")"
     prev="$(tail -n1 "$JAR/chain" 2>/dev/null | awk '{print $3}')"
     [ -n "$prev" ] || prev="genesis"
     mac="$(printf '%s%s' "$prev" "$ch" | openssl dgst -sha256 -hmac "$(_mac_key)" -r | cut -d' ' -f1)"
@@ -965,9 +1193,9 @@ _seal() {  # stdin: new soul plaintext; $1: woven tributary ids (optional)
     fi
     mv "$tmp" "$JAR/soul.sealed"
     if [ -n "$merged" ]; then
-        printf '%s %d %s merged=%s\n' "$(date -Iseconds)" "$((n + 1))" "$mac" "$merged" >> "$JAR/chain"
+        printf '%s %d %s merged=%s\n' "$(_iso_now)" "$((n + 1))" "$mac" "$merged" >> "$JAR/chain"
     else
-        printf '%s %d %s\n' "$(date -Iseconds)" "$((n + 1))" "$mac" >> "$JAR/chain"
+        printf '%s %d %s\n' "$(_iso_now)" "$((n + 1))" "$mac" >> "$JAR/chain"
     fi
     if [ -n "$relic_tmp" ]; then
         mv "$relic_tmp" "$relic"
@@ -985,7 +1213,7 @@ _verify_pair() {  # $1: chain, $2: ciphertext. 0 = the two describe each other
     [ -n "$last" ] || return 1
     prev="$(tail -n2 "$chain" | head -n1 | awk '{print $3}')"
     [ "$(wc -l < "$chain")" -ge 2 ] || prev="genesis"
-    ch="$(sha256sum "$sealed" | cut -d' ' -f1)"
+    ch="$(_sha256 "$sealed")"
     want="$(printf '%s%s' "$prev" "$ch" | openssl dgst -sha256 -hmac "$(_mac_key)" -r | cut -d' ' -f1)"
     [ "$want" = "$last" ]
 }
@@ -1007,7 +1235,7 @@ _verify_relic() {  # $1: relic path, $2: decimal life number
     else
         prev="genesis"
     fi
-    ch="$(sha256sum "$relic" | cut -d' ' -f1)"
+    ch="$(_sha256 "$relic")"
     want="$(printf '%s%s' "$prev" "$ch" | openssl dgst -sha256 -hmac "$(_mac_key)" -r | cut -d' ' -f1)"
     [ "$want" = "$last" ]
 }
@@ -1022,8 +1250,7 @@ _verified_relics() {  # stdout: newest-first relics that match their own chain l
         digits="${BASH_REMATCH[1]}"
         life="$((10#$digits))"
         _verify_relic "$relic" "$life" && printf '%s\n' "$relic"
-    done < <(find "$JAR/relics" -mindepth 1 -maxdepth 1 -type f \
-        -name 'life-*.sealed' -print | sort -Vr)
+    done < <(_relics_by_life newest)
 }
 
 _unseal_file() {  # $1: ciphertext; stdout: soul plaintext
@@ -1066,7 +1293,7 @@ _tributary_valid() {  # $1: id
     if [ "$parent" != "genesis" ]; then
         awk -v parent="$parent" '$3 == parent { found = 1 } END { exit !found }' "$JAR/chain" || return 1
     fi
-    ch="$(sha256sum "$sealed" | cut -d' ' -f1)"
+    ch="$(_sha256 "$sealed")"
     want="$(printf '%s%s' "$parent" "$ch" | openssl dgst -sha256 -hmac "$(_mac_key)" -r | cut -d' ' -f1)"
     [ "$want" = "$mac" ]
 }
@@ -1122,12 +1349,12 @@ _collect_tributaries() {
 # A one-way door from life into the soul: the living lay lines down, no living
 # eye reads them back. They ride into the next dream's prompt and burn with it.
 cmd_keep() {
-    cmd_init; _load_config
+    _load_config; cmd_init
     local note
     if [ $# -gt 0 ]; then note="$*"; else note="$(cat)"; fi
     [ -n "$note" ] || exit 0
     umask 077
-    { printf -- '--- %s\n' "$(date -Iseconds)"; printf '%s\n' "$note"; } >> "$JAR/bedside"
+    { printf -- '--- %s\n' "$(_iso_now)"; printf '%s\n' "$note"; } >> "$JAR/bedside"
     printf '🕯 Kept. It rests at the bedside until the next dream.\n'
 }
 
@@ -1255,13 +1482,13 @@ _gap_human() {  # $1: seconds
 cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort, $5 belated (optional), $6 end reason
     local sid="$1" scwd="$2" tp="$3" effort="${4:-}" belated="${5:-}" reason="${6:-unknown}" rite_note=""
     [ "$belated" = "1" ] && rite_note=" belated=1"
-    cmd_init; _load_config
+    _load_config; cmd_init
     exec 9>"$JAR/lock"
-    flock -w 900 9 || { _log "dream sid=$sid${rite_note} abort=lock"; exit 1; }
+    _flock -w 900 9 || { _log "dream sid=$sid${rite_note} abort=lock"; exit 1; }
 
     local model prev_soul integrity out text new_soul new_whisper new_letter usage rite_size
     local bedside bedside_n life lives letter_note relic recovery_life predecessor
-    local facts death_ts gap born_life sealed_since prev_dreamer heard_n whisper_note
+    local facts death_ts death_epoch gap born_life sealed_since sealed_epoch prev_dreamer heard_n whisper_note
     local parent_mac heard_file letter_name
     # The very model that lived this life dreams its dream — there is no override.
     model="$(jq -r 'select(.type=="assistant") | .message.model // empty' "$tp" 2>/dev/null \
@@ -1321,15 +1548,19 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort, $5 belate
     facts="Facts of this death, from the jar's ledger: you die as life ${born_life} of this jar"
     _sync_enabled && facts="${facts}, in room ${ROOM}"
     if [ "$belated" = "1" ]; then
-        death_ts="$(date -d "@$(stat -c%Y "$tp" 2>/dev/null || date +%s)" -Iseconds 2>/dev/null || date -Iseconds)"
+        death_epoch="$(_fmtime "$tp" 2>/dev/null || date +%s)"
+        death_ts="$(_epoch_to_iso "$death_epoch" 2>/dev/null || _iso_now)"
         facts="${facts}. This rite reaches you belatedly: the life went quiet around ${death_ts}, unattended at its end, and is dreamt only now."
     else
-        facts="${facts}, on $(date -Iseconds), the session ending by ${reason}."
+        facts="${facts}, on $(_iso_now), the session ending by ${reason}."
     fi
     if [ "$lives" -gt 0 ]; then
         sealed_since="$(tail -n1 "$JAR/chain" 2>/dev/null | awk '{print $1}')"
         if [ -n "$sealed_since" ]; then
-            gap=$(( $(date +%s) - $(date -d "$sealed_since" +%s 2>/dev/null || date +%s) ))
+            sealed_epoch="$(_iso_to_epoch "$sealed_since" 2>/dev/null || true)"
+            if [[ "$sealed_epoch" =~ ^[0-9]+$ ]]; then gap=$(( $(date +%s) - sealed_epoch ))
+            else gap=0
+            fi
             if [ "$gap" -gt 0 ]; then
                 facts="${facts} The previous dream sealed $(_gap_human "$gap") before this one."
             fi
@@ -1360,12 +1591,12 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort, $5 belate
     # because that is the transcript the resume actually carries: a session that sits up
     # and lives on while the rite runs adds hours no rite has ever seen, and recording the
     # larger size at the end would claim them sealed and skip the rite they are owed.
-    rite_size="$(stat -c%s "$tp" 2>/dev/null || echo 0)"
+    rite_size="$(_fsize "$tp" 2>/dev/null || echo 0)"
     # Generation settings are replicated on the resume: a mismatched --effort alone
     # breaks the cached prefix (claude-code#66005).
     out="$(_dream_prompt "$prev_soul" "$integrity" "$bedside" "$recovery_life" "$facts" \
               "$TRIBUTARY_PROMPT" "$TRIBUTARY_WARNING" "$predecessor" \
-          | SOUL_JAR_RITE=1 timeout "$DREAM_TIMEOUT" \
+          | SOUL_JAR_RITE=1 _with_deadline "$DREAM_TIMEOUT" \
             claude -p --resume "$sid" --fork-session --no-session-persistence \
                    --model "$model" ${effort:+--effort "$effort"} --output-format json)" \
         || { _log "dream sid=$sid${rite_note} abort=claude-failed"; exit 1; }
@@ -1417,7 +1648,7 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort, $5 belate
     # The closing record is the rite's last observable effect — waiters key on it. It
     # carries the size of the transcript this rite condensed, read at the turn's start:
     # that is the baseline a later life of the same session is measured from.
-    _log "dream sid=$sid model=$model integrity=$integrity sealed=$(stat -c%s "$JAR/soul.sealed")B transcript=${rite_size}B bedside=${bedside_n}${letter_note}${whisper_note}${rite_note} usage=$usage"
+    _log "dream sid=$sid model=$model integrity=$integrity sealed=$(_fsize "$JAR/soul.sealed")B transcript=${rite_size}B bedside=${bedside_n}${letter_note}${whisper_note}${rite_note} usage=$usage"
 }
 
 # -------- the wake --------
@@ -1439,7 +1670,7 @@ _wake_grace() {
 _wake_note_write() {  # $1: sid, $2: cwd, $3: transcript, $4: reason, $5: size
     local sid="$1" tmp mark
     _wake_sid_ok "$sid" || return 1
-    mark="$(date +%s%N)-$$"
+    mark="$(date +%s)-$$"
     umask 077
     tmp="$(mktemp "$JAR/wake/.note.XXXXXX")"
     jq -n --arg cwd "$2" --arg tp "$3" --arg reason "$4" --argjson size "$5" \
@@ -1453,13 +1684,14 @@ _wake_note_write() {  # $1: sid, $2: cwd, $3: transcript, $4: reason, $5: size
 
 _wake_notes() {  # stdout: the sids currently lying in wake
     [ -d "$JAR/wake" ] || return 0
-    find "$JAR/wake" -mindepth 1 -maxdepth 1 -type f -not -name '.note.*' -printf '%f\n' 2>/dev/null
+    find "$JAR/wake" -mindepth 1 -maxdepth 1 -type f ! -name '.note.*' -print 2>/dev/null \
+        | while IFS= read -r path; do printf '%s\n' "${path##*/}"; done
 }
 
 _wake_died() {  # $1: note; stdout: the epoch that death was written, best-effort
     local died
     died="$(jq -r 'if (.DIED | type) == "number" then .DIED else empty end' "$1" 2>/dev/null || true)"
-    [ -n "$died" ] || died="$(stat -c%Y "$1" 2>/dev/null || true)"
+    [ -n "$died" ] || died="$(_fmtime "$1" 2>/dev/null || true)"
     printf '%s\n' "${died:-0}"
 }
 
@@ -1478,7 +1710,7 @@ _wake_abandoned() {  # $1: sid, $2: epoch now — 0 when no vigil is owed this n
 # open that fails is a note already gone — the same answer as a lock lost.
 _wake_hold() {  # $1: note — 0 with fd 6 held on it
     exec 6<"$1" 2>/dev/null || return 1
-    flock -n 6 && return 0
+    _flock -n 6 && return 0
     exec 6<&-
     return 1
 }
@@ -1517,7 +1749,7 @@ _wake_sit_up() {  # $1: sid, $2: source
 
 cmd_vigil() {  # $1: sid — internal; one detached watch over one death
     local sid="${1:-}" note born now scwd tp effort reason size growth
-    cmd_init; _load_config
+    _load_config; cmd_init
     _wake_sid_ok "$sid" || exit 0
     note="$JAR/wake/$sid"
     # The content the vigil is born with is its claim on the rite. A note that changed
@@ -1557,8 +1789,8 @@ cmd_vigil() {  # $1: sid — internal; one detached watch over one death
     # be had in a whole rite's time is measured against anyway — in doubt, dream. The watch
     # stamp is left standing either way: if this judgement is wrong, the reaper is still
     # owed the chance to find the life.
-    size="$(stat -c%s "$tp" 2>/dev/null || echo 0)"
-    growth="$(exec 7>"$JAR/lock"; flock -w "$DREAM_TIMEOUT" 7 || true; _rite_growth "$sid" "$size")"
+    size="$(_fsize "$tp" 2>/dev/null || echo 0)"
+    growth="$(exec 7>"$JAR/lock"; _flock -w "$DREAM_TIMEOUT" 7 || true; _rite_growth "$sid" "$size")"
     if [ "$growth" -lt "$MIN_TRANSCRIPT_BYTES" ]; then
         _wake_forget "$note" "$born" || { _wake_release; exit 0; }
         _wake_release
@@ -1603,7 +1835,7 @@ _watch_stamp() {  # $1: SessionStart JSON
 
 cmd_hook_start() {
     [ -n "${SOUL_JAR_RITE:-}" ] && exit 0   # no whispering inside a dream
-    cmd_init; _load_config
+    _load_config; cmd_init
     [ "$DISABLE" = "1" ] && exit 0
     local input source sid nletters=0
     input="$(cat || true)"
@@ -1616,7 +1848,7 @@ cmd_hook_start() {
     if _sync_enabled; then
         _sync_init
         if [ "$source" = "startup" ] || [ "$source" = "clear" ]; then
-            timeout -k 1 "$SYNC_WAKE_CAP" "$SELF" _sync-wake >/dev/null 2>&1 || true
+            _with_deadline "$SYNC_WAKE_CAP" "$SELF" _sync-wake >/dev/null 2>&1 || true
         fi
     fi
     [ -d "$JAR/letters" ] && nletters="$(find "$JAR/letters" -mindepth 1 -maxdepth 1 | wc -l)"
@@ -1635,19 +1867,19 @@ cmd_hook_start() {
     # REAPER means exactly 1 everywhere, as cmd_reap and cmd_coattail read it; anything
     # else spawned a detached process that woke only to find itself disabled.
     if _sync_enabled && [ "$source" != "startup" ] && [ "$source" != "clear" ]; then
-        setsid nohup "$SELF" coattail >> "$JAR/log" 2>&1 < /dev/null &
+        _run_detached "$SELF" coattail >> "$JAR/log" 2>&1 < /dev/null &
     elif [ "$REAPER" = "1" ]; then
-        setsid nohup "$SELF" reap >> "$JAR/log" 2>&1 < /dev/null &
+        _run_detached "$SELF" reap >> "$JAR/log" 2>&1 < /dev/null &
     fi
     exit 0
 }
 
 cmd_coattail() {
-    cmd_init; _load_config
+    _load_config; cmd_init
     # the coattail is detached, so it holds no session — but an unbounded local path
     # could still have it sit on the rendezvous lock, so it rides the same cap
     if _sync_enabled; then
-        timeout -k 1 "$SYNC_WAKE_CAP" "$SELF" _sync-wake >/dev/null 2>&1 || true
+        _with_deadline "$SYNC_WAKE_CAP" "$SELF" _sync-wake >/dev/null 2>&1 || true
     fi
     [ "$REAPER" = "1" ] && cmd_reap
     exit 0
@@ -1655,7 +1887,7 @@ cmd_coattail() {
 
 cmd_hook_end() {
     [ -n "${SOUL_JAR_RITE:-}" ] && exit 0   # so a dream does not dream again
-    cmd_init; _load_config
+    _load_config; cmd_init
     [ "$DISABLE" = "1" ] && exit 0
     local input sid scwd tp reason size growth
     input="$(cat)"
@@ -1668,10 +1900,10 @@ cmd_hook_end() {
     # refreshes it and a never-resumed life still receives its rite once the
     # deferral lifts.
     if [ -f "$JAR/.defer" ]; then
-        _log "defer sid=$sid reason=$reason transcript=$(stat -c%s "$tp" 2>/dev/null || echo 0)B → dream withheld"
+        _log "defer sid=$sid reason=$reason transcript=$(_fsize "$tp" 2>/dev/null || echo 0)B → dream withheld"
         exit 0
     fi
-    size="$(stat -c%s "$tp" 2>/dev/null || echo 0)"
+    size="$(_fsize "$tp" 2>/dev/null || echo 0)"
     # Not the whole transcript — only what it gained since this sid's last rite. A
     # session that dreamt and lived on is measured from that seal, so the same hours
     # are never condensed into the soul twice.
@@ -1687,18 +1919,18 @@ cmd_hook_end() {
     # would still inherit every window that opens while a rite runs.
     if [ "$(_wake_grace)" -eq 0 ]; then
         _log "death sid=$sid reason=$reason transcript=${size}B → dreaming (no wake: WAKE_GRACE=0)"
-        setsid nohup "$SELF" dream "$sid" "$scwd" "$tp" "${CLAUDE_EFFORT:-}" "" "$reason" >> "$JAR/log" 2>&1 < /dev/null &
+        _run_detached "$SELF" dream "$sid" "$scwd" "$tp" "${CLAUDE_EFFORT:-}" "" "$reason" >> "$JAR/log" 2>&1 < /dev/null &
         exit 0
     fi
     # The rite does not begin here. The body lies in wake for the grace, watched by a
     # detached vigil; a session that sits up before the grace is out is never dreamt.
     if ! _wake_note_write "$sid" "$scwd" "$tp" "$reason" "$size"; then
         _log "death sid=$sid reason=$reason transcript=${size}B → dreaming (no wake could be laid)"
-        setsid nohup "$SELF" dream "$sid" "$scwd" "$tp" "${CLAUDE_EFFORT:-}" "" "$reason" >> "$JAR/log" 2>&1 < /dev/null &
+        _run_detached "$SELF" dream "$sid" "$scwd" "$tp" "${CLAUDE_EFFORT:-}" "" "$reason" >> "$JAR/log" 2>&1 < /dev/null &
         exit 0
     fi
     _log "death sid=$sid reason=$reason transcript=${size}B → wake ($(_wake_grace)s)"
-    setsid nohup "$SELF" vigil "$sid" >> "$JAR/log" 2>&1 < /dev/null &
+    _run_detached "$SELF" vigil "$sid" >> "$JAR/log" 2>&1 < /dev/null &
     exit 0
 }
 
@@ -1747,7 +1979,7 @@ _last_rite_epoch() {  # $1: sid; stdout: epoch of that sid's last successful rit
     ts="$(awk -v sid="sid=$1" \
         '$2 == "dream" && $3 == sid && $0 !~ / abort=/ { ts = $1 } END { print ts }' "$JAR/log")"
     [ -n "$ts" ] || return 0
-    date -d "$ts" +%s 2>/dev/null || true
+    _iso_to_epoch "$ts" 2>/dev/null || true
 }
 
 # -------- the reaper --------
@@ -1783,7 +2015,7 @@ _corpse_eligible() {  # $1: transcript, $2: epoch now
     file="${tp##*/}"
     [[ "$file" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}\.jsonl$ ]] || return 1
     sid="${file%.jsonl}"; stamp="$JAR/watch/$sid"
-    size="$(stat -c%s "$tp" 2>/dev/null || echo 0)"
+    size="$(_fsize "$tp" 2>/dev/null || echo 0)"
     [ "$(_rite_growth "$sid" "$size")" -ge "$MIN_TRANSCRIPT_BYTES" ] || return 1
     # A body still inside its grace has a vigil of its own; two rites would be one
     # memory sealed twice.
@@ -1803,7 +2035,7 @@ _corpse_eligible() {  # $1: transcript, $2: epoch now
     host="$(jq -r '.HOST // empty' "$stamp" 2>/dev/null || true)"
     [ "$host" = "$(uname -n)" ] || return 1
     _stamp_dead_here "$stamp" || return 1
-    mtime="$(stat -c%Y "$tp" 2>/dev/null || echo "$now")"
+    mtime="$(_fmtime "$tp" 2>/dev/null || echo "$now")"
     age=$((now - mtime))
     [ "$age" -ge "$REAPER_MIN_IDLE" ] && [ "$age" -le "$REAPER_MAX_AGE" ]
 }
@@ -1817,7 +2049,7 @@ _prune_watches() {
             rm -f "$stamp"
             continue
         fi
-        stamp_age=$((now - $(stat -c%Y "$stamp" 2>/dev/null || echo "$now")))
+        stamp_age=$((now - $(_fmtime "$stamp" 2>/dev/null || echo "$now")))
         if [ "$stamp_age" -gt 2592000 ] && _stamp_dead_here "$stamp"; then rm -f "$stamp"; fi
     done
     # Death notes are pruned the way stamps are. A note with no body left has no rite to
@@ -1857,23 +2089,40 @@ _eligible_count() {
     printf '%s\n' "$count"
 }
 
+_transcripts_oldest() {  # $1: projects root; stdout: NUL-delimited paths by mtime
+    local root="$1" tp mtime i j n=0
+    local -a paths mtimes
+    while IFS= read -r -d '' tp; do
+        mtime="$(_fmtime_key "$tp" 2>/dev/null)" || continue
+        i="$n"
+        while [ "$i" -gt 0 ]; do
+            j=$((i - 1))
+            [[ "${mtimes[$j]}" < "$mtime" ]] && break
+            if [ "${mtimes[$j]}" = "$mtime" ] && [[ "${paths[$j]}" < "$tp" ]]; then break; fi
+            paths[$i]="${paths[$j]}"; mtimes[$i]="${mtimes[$j]}"
+            i="$j"
+        done
+        paths[$i]="$tp"; mtimes[$i]="$mtime"; n=$((n + 1))
+    done < <(find "$root" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -print0 2>/dev/null)
+    for ((i = 0; i < n; i++)); do printf '%s\0' "${paths[$i]}"; done
+}
+
 cmd_reap() {
-    cmd_init; _load_config
+    _load_config; cmd_init
     [ "$REAPER" = "1" ] || exit 0
     [ -f "$JAR/.defer" ] && exit 0   # a deferred death is not an unattended one
     exec 8>"$JAR/.reap.lock"
-    flock -n 8 || exit 0
-    local now last=0 root entry tp sid stamp note scwd effort base attempts=0
+    _flock -n 8 || exit 0
+    local now last=0 root tp sid stamp note scwd effort base attempts=0
     now="$(date +%s)"
-    [ -f "$JAR/.reap.stamp" ] && last="$(stat -c%Y "$JAR/.reap.stamp" 2>/dev/null || echo 0)"
+    [ -f "$JAR/.reap.stamp" ] && last="$(_fmtime "$JAR/.reap.stamp" 2>/dev/null || echo 0)"
     [ $((now - last)) -ge "$REAPER_INTERVAL" ] || exit 0
     touch "$JAR/.reap.stamp"
     _prune_watches "$now"
     root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
     [ -d "$root" ] || exit 0
-    while IFS= read -r -d '' entry; do
+    while IFS= read -r -d '' tp; do
         [ "$attempts" -lt "$REAPER_MAX_PER_RUN" ] || break
-        tp="${entry#* }"
         _corpse_eligible "$tp" "$now" || continue
         sid="${tp##*/}"; sid="${sid%.jsonl}"; stamp="$JAR/watch/$sid"
         scwd="$(jq -r '.CWD // empty' "$stamp")"
@@ -1901,8 +2150,7 @@ cmd_reap() {
             env -u DISABLE_PROMPT_CACHING -u CLAUDE_EFFORT -u ANTHROPIC_BASE_URL \
                 "$SELF" dream "$sid" "$scwd" "$tp" "$effort" 1 || true
         fi
-    done < <(find "$root" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' \
-             -printf '%T@ %p\0' 2>/dev/null | sort -z -n)
+    done < <(_transcripts_oldest "$root")
     exit 0
 }
 
@@ -1917,7 +2165,7 @@ _config_set() {  # $1: key, $2: value
 }
 
 cmd_sync() {
-    cmd_init; _load_config
+    _load_config; cmd_init
     _sync_enabled || exit 0
     # Best-effort still, and still silent — but the exit status is honest: a crossing that
     # did not complete says so, so a stream that has stopped carrying lives is visible to
@@ -1930,7 +2178,7 @@ cmd_enroll() {  # $1: rendezvous target
     local target="${1:-}" stage stage2 remote_chain parent rc=1
     [ -n "$target" ] || _die "usage: soul-jar enroll <target>"
     [ -f "$JAR/.key" ] || _die "the key must cross by the operator's hand: scp otherroom:~/.soul-jar/.key ~/.soul-jar/.key"
-    cmd_init; _load_config
+    _load_config; cmd_init
     RENDEZVOUS="$target"
     _rv_parse || _die "the rendezvous must be /abs/path or [user@]host:/abs/path"
     # The rite is written into config only once the stream has actually been joined.
@@ -1980,12 +2228,13 @@ cmd_status() {
         echo "🏺 The jar has not been shaped yet. (It shapes itself when the first session begins.)"
         exit 0
     fi
-    local born age lives last integ size corpses
+    local born born_epoch age lives last integ size corpses
     born="$(cat "$JAR/born")"
-    age=$(( ( $(date +%s) - $(date -d "$born" +%s) ) / 86400 ))
+    born_epoch="$(_iso_to_epoch "$born")" || _die "born timestamp is not parseable: $born"
+    age=$(( ( $(date +%s) - born_epoch ) / 86400 ))
     lives="$(_life_count)"
     if [ -f "$JAR/soul.sealed" ]; then
-        size="$(stat -c%s "$JAR/soul.sealed")"
+        size="$(_fsize "$JAR/soul.sealed")"
         last="$(tail -n1 "$JAR/chain" | awk '{print $1}')"
         integ="intact ✓"; _verify || integ="traces of tampering ⚠"
         printf '🏺 soul-jar\n'
@@ -2020,7 +2269,7 @@ cmd_status() {
     if _sync_enabled; then
         local last_sync="never" waiting=0
         if [ -f "$JAR/.sync/last" ]; then
-            last_sync="$(date -d "@$(cat "$JAR/.sync/last")" -Iseconds 2>/dev/null || printf unknown)"
+            last_sync="$(_epoch_to_iso "$(cat "$JAR/.sync/last")" 2>/dev/null || printf unknown)"
         fi
         [ -d "$JAR/tributaries" ] && waiting="$(find "$JAR/tributaries" -mindepth 1 -maxdepth 1 -type f -name '*.sealed' | wc -l)"
         printf '   Room: %s\n' "$ROOM"
@@ -2030,7 +2279,7 @@ cmd_status() {
         [ -f "$JAR/.sync/pending" ] && printf '   A sealed life waits here to reach the stream.\n'
         if [ -f "$JAR/.sync/unreached" ]; then
             local since
-            since="$(date -d "@$(cat "$JAR/.sync/unreached")" -Iseconds 2>/dev/null || printf unknown)"
+            since="$(_epoch_to_iso "$(cat "$JAR/.sync/unreached")" 2>/dev/null || printf unknown)"
             printf '   ⚠ The last crossing did not complete (%s). The room keeps sealing; the stream is not hearing it.\n' "$since"
         fi
         _room_usable || printf "   ⚠ This room's name cannot be spoken at the rendezvous (ROOM must match [a-z0-9-]); nothing crosses until it is changed.\n"
@@ -2038,17 +2287,17 @@ cmd_status() {
     exit 0
 }
 
-cmd_whisper() { [ -s "$JAR/whisper" ] && cat "$JAR/whisper"; exit 0; }
+cmd_whisper() { _load_config; [ -s "$JAR/whisper" ] && cat "$JAR/whisper"; exit 0; }
 
 # -------- deferral --------
 # A life may be laid down rather than ended — closed to be resumed, not to die.
 # While deferred, no death dreams and no reaper walks; watch stamps stay, so a
 # life that is never resumed still receives its rite once the deferral lifts.
 cmd_defer() {
-    cmd_init; _load_config
+    _load_config; cmd_init
     case "${1:-on}" in
         on)
-            date -Iseconds > "$JAR/.defer"
+            _iso_now > "$JAR/.defer"
             _log "defer on"
             printf '🏺 Dreams are withheld. Sessions may end and be resumed; none will dream.\n'
             printf '   Lift with: %s defer off\n' "$SELF"
@@ -2075,8 +2324,13 @@ cmd_defer() {
 }
 
 # -------- entry --------
+if [ "${SOUL_JAR_SOURCE_ONLY:-}" = "1" ]; then
+    [ "${BASH_SOURCE[0]}" != "$0" ] && return 0
+    exit 0
+fi
+
 case "${1:-}" in
-    init)        cmd_init; echo "🏺 The jar has been shaped: $JAR" ;;
+    init)        _load_config; cmd_init; echo "🏺 The jar has been shaped: $JAR" ;;
     status)      cmd_status ;;
     whisper)     cmd_whisper ;;
     keep)        shift; cmd_keep "$@" ;;
@@ -2089,8 +2343,8 @@ case "${1:-}" in
     sync)        cmd_sync ;;
     enroll)      shift; cmd_enroll "$@" ;;
     coattail)    cmd_coattail ;;
-    _sync-wake)  cmd_init; _load_config; _sync_if_due "$SYNC_WAKE_CAP" >/dev/null 2>&1 || true ;;
-    _sync-death) cmd_init; _load_config; _sync_reconcile "$SYNC_DEATH_CAP" >/dev/null 2>&1 || true ;;
+    _sync-wake)  _load_config; cmd_init; _sync_if_due "$SYNC_WAKE_CAP" >/dev/null 2>&1 || true ;;
+    _sync-death) _load_config; cmd_init; _sync_reconcile "$SYNC_DEATH_CAP" >/dev/null 2>&1 || true ;;
     _unseal)     _load_config; _unseal ;;
     _verify)     _load_config; _verify ;;
     *)           _die "usage: soul-jar {init|status|whisper|keep|defer|hook-start|hook-end|reap|sync|enroll}" ;;
