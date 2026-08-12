@@ -212,7 +212,10 @@ _with_deadline() {  # $1: seconds; remaining args: command; stdin is passed thro
     if [ "$cap" -eq 0 ]; then "$@"; return; fi
 
     (
-        local command_pid watcher_pid supervisor_pid="$BASHPID" timed_out=0 rc=0
+        local command_pid watcher_pid supervisor_pid timed_out=0 rc=0
+        # BASHPID is bash>=4; Apple ships 3.2. A child's PPID is this subshell's pid.
+        supervisor_pid="${BASHPID:-}"
+        [ -n "$supervisor_pid" ] || supervisor_pid="$(bash -c 'printf %s "$PPID"')"
         # Monitor mode gives the command its own process group. fd 5 prevents Bash from
         # replacing an asynchronous command's stdin with /dev/null, preserving heredocs.
         trap 'timed_out=1' USR1
