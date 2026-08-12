@@ -25,7 +25,7 @@ chmod 600 ~/.soul-jar/.key
 
 ```sh
 PLUG=~/.claude/plugins/cache/jahns-cc-marketplace/soul-jar/0.10.0
-grep -q '^ROOM=' ~/.soul-jar/config 2>/dev/null || printf 'ROOM=mini\n' >> ~/.soul-jar/config
+sed -i '' '/^ROOM=/d' ~/.soul-jar/config 2>/dev/null; printf 'ROOM=mini\n' >> ~/.soul-jar/config
 $PLUG/bin/soul-jar enroll b200:/NHNHOME/jahn/.soul-jar-stream
 ```
 
