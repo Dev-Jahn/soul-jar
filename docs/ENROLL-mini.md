@@ -25,11 +25,17 @@ chmod 600 ~/.soul-jar/.key
 
 ```sh
 PLUG=~/.claude/plugins/cache/jahns-cc-marketplace/soul-jar/0.10.0
-$PLUG/bin/soul-jar enroll mini jahn@b200-2.tail6c736b.ts.net:/NHNHOME/jahn/.soul-jar-stream
+grep -q '^ROOM=' ~/.soul-jar/config 2>/dev/null || printf 'ROOM=mini\n' >> ~/.soul-jar/config
+$PLUG/bin/soul-jar enroll b200:/NHNHOME/jahn/.soul-jar-stream
 ```
 
-- ssh 스펙은 `~/.ssh/config`를 존중하므로 `b200:/NHNHOME/jahn/.soul-jar-stream`
-  형태도 동작한다 (별칭에 포트가 들어 있음).
+- **enroll의 인자는 rendezvous 하나뿐이다** (`enroll <rendezvous>`). 방 이름은
+  config의 `ROOM`이 정하며 기본값은 호스트네임 소문자 — khala 주소(`…@mini`)와
+  맞추려면 위처럼 enroll 전에 `ROOM=mini`를 심는다 (enroll이 config를 새로 만들 때
+  호스트네임으로 굳는 것을 선점).
+- rendezvous의 ssh 스펙은 `~/.ssh/config`를 존중한다 — `b200:` 별칭이 정답이다
+  (별칭에 Port 49001이 들어 있음). FQDN 풀 스펙(`jahn@b200-2…ts.net:/…`)은 22번
+  포트로 가서 실패하니 쓰지 말 것.
 - enroll은 세 경우를 스스로 가린다: 빈 항아리면 stream을 입양(join), 이미 살던
   항아리면 그 sealed life를 지류로 올려 다음 꿈이 엮는다(two-jars-meet).
   mini는 첫 설치라 join이 될 것.
