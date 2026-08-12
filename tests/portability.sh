@@ -8,6 +8,10 @@ trap 'rm -rf "$TMP"' EXIT
 SCRIPT="$PWD/bin/soul-jar"
 PASS=0; FAIL=0
 
+# The suite itself must run on GNU and BSD alike (see run.sh for the same shims).
+sedi() { sed -i.sedi-bak "$@" && rm -f "${@: -1}.sedi-bak"; }
+command -v sha256sum >/dev/null 2>&1 || sha256sum() { shasum -a 256 "$@"; }
+
 ok()  { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 assert() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
@@ -35,9 +39,9 @@ ROOM="$TMP/room"
 STREAM="$TMP/stream"
 mkdir -p "$STREAM"
 PATH="$MASKED_PATH" SOUL_JAR_HOME="$ROOM" /bin/bash "$SCRIPT" init >/dev/null
-sed -i 's/^ROOM=.*/ROOM=portability/' "$ROOM/config"
-sed -i "s|^RENDEZVOUS=.*|RENDEZVOUS=$STREAM|" "$ROOM/config"
-sed -i 's/^SYNC_DEATH_CAP=.*/SYNC_DEATH_CAP=1/' "$ROOM/config"
+sedi 's/^ROOM=.*/ROOM=portability/' "$ROOM/config"
+sedi "s|^RENDEZVOUS=.*|RENDEZVOUS=$STREAM|" "$ROOM/config"
+sedi 's/^SYNC_DEATH_CAP=.*/SYNC_DEATH_CAP=1/' "$ROOM/config"
 set +e
 PATH="$MASKED_PATH" SOUL_JAR_HOME="$ROOM" /bin/bash "$SCRIPT" sync \
     >"$TMP/local.out" 2>"$TMP/local.err"
@@ -53,7 +57,7 @@ cat > "$HANG_BIN/ssh" <<'SH'
 sleep 10
 SH
 chmod +x "$HANG_BIN/ssh"
-sed -i 's|^RENDEZVOUS=.*|RENDEZVOUS=portability.invalid:/stream|' "$ROOM/config"
+sedi 's|^RENDEZVOUS=.*|RENDEZVOUS=portability.invalid:/stream|' "$ROOM/config"
 SECONDS=0
 set +e
 PATH="$HANG_BIN:$MASKED_PATH" SOUL_JAR_HOME="$ROOM" /bin/bash "$SCRIPT" sync \
@@ -156,12 +160,14 @@ assert "the GNU checksum branch emits hex only" test "$GNU_HASH" = "$EXPECTED"
 assert "the shasum branch is byte-identical" test "$BSD_HASH" = "$EXPECTED"
 
 echo "=== P4: BSD stat/date proxy ==="
-BSD_BIN="$TMP/bsd-bin"
-mkdir -p "$BSD_BIN"
-REAL_STAT="$(type -P stat)"
-REAL_DATE="$(type -P date)"
-export REAL_STAT REAL_DATE
-cat > "$BSD_BIN/stat" <<'SH'
+if stat -c%s "$SCRIPT" >/dev/null 2>&1; then
+    # GNU host: shim stat/date into their BSD spellings so the BSD branches run.
+    BSD_BIN="$TMP/bsd-bin"
+    mkdir -p "$BSD_BIN"
+    REAL_STAT="$(type -P stat)"
+    REAL_DATE="$(type -P date)"
+    export REAL_STAT REAL_DATE
+    cat > "$BSD_BIN/stat" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
     -c*) exit 1 ;;
@@ -170,7 +176,7 @@ case "${1:-}" in
     *) exit 1 ;;
 esac
 SH
-cat > "$BSD_BIN/date" <<'SH'
+    cat > "$BSD_BIN/date" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
     -d) exit 1 ;;
@@ -186,8 +192,13 @@ case "${1:-}" in
     *) exec "$REAL_DATE" "$@" ;;
 esac
 SH
-chmod +x "$BSD_BIN/stat" "$BSD_BIN/date"
-BSD_PATH="$BSD_BIN:$MASKED_PATH"
+    chmod +x "$BSD_BIN/stat" "$BSD_BIN/date"
+    BSD_PATH="$BSD_BIN:$MASKED_PATH"
+else
+    # Real BSD userland: no proxy needed — the branches under test are the native ones,
+    # and the "GNU" comparisons below degrade to self-consistency checks, which is the point.
+    BSD_PATH="$MASKED_PATH"
+fi
 
 GNU_SIZE="$(run_helper "$PATH" _fsize "$TMP/input")"
 BSD_SIZE="$(run_helper "$BSD_PATH" _fsize "$TMP/input")"
