@@ -235,8 +235,51 @@ awk '
     /^}/ { fn = "" }
 ' "$SCRIPT" > "$VIOLATIONS"
 assert "GNU-only spellings occur only in portability helpers" test ! -s "$VIOLATIONS"
-assert "the plugin version is 0.10.2" \
-    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.2"
+assert "the plugin version is 0.10.3" \
+    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.3"
+
+echo "=== P7: no heredoc inside command substitution ==="
+HEREDOC_SUB_VIOLATIONS="$TMP/heredoc-substitution-violations"
+# Approximation: a multiline $(...) is followed for at most eight lines, and the
+# first later ')' is treated as its close. This catches the compact call shapes used
+# here; it can miss a longer substitution or one containing ')' before its heredoc.
+awk '
+    {
+        rest = $0
+        while (match(rest, /\$\(/)) {
+            after = substr(rest, RSTART + 2)
+            if (after !~ /\)/) sub_line = FNR
+            rest = after
+        }
+        if (sub_line && FNR - sub_line <= 8 &&
+            $0 ~ /<<-?[[:space:]]*["\047]?[[:alpha:]_][[:alnum:]_]*["\047]?/)
+            print FNR ":" $0
+        if (sub_line && (FNR - sub_line >= 8 || (FNR > sub_line && $0 ~ /\)/)))
+            sub_line = 0
+    }
+' "$SCRIPT" > "$HEREDOC_SUB_VIOLATIONS"
+assert "no heredoc opens inside a nearby unclosed command substitution" \
+    test ! -s "$HEREDOC_SUB_VIOLATIONS"
+
+echo "=== P8: extracted remote scripts ==="
+assert "the stage-sweep script is loaded with its remote find" \
+    bash -c '
+        SOUL_JAR_SOURCE_ONLY=1 . "$1"
+        [ -n "${_rv_sweep_stages_script:-}" ] &&
+            [[ "$_rv_sweep_stages_script" == *"$2"* ]]
+    ' _ "$SCRIPT" 'find "$root" -maxdepth 1 -mmin "+$mins"'
+assert "the lock script is loaded with its remote mkdir" \
+    bash -c '
+        SOUL_JAR_SOURCE_ONLY=1 . "$1"
+        [ -n "${_rv_lock_script:-}" ] &&
+            [[ "$_rv_lock_script" == *"$2"* ]]
+    ' _ "$SCRIPT" 'mkdir "$root/.lock"'
+assert "the letter-prune script is loaded with its remote removal" \
+    bash -c '
+        SOUL_JAR_SOURCE_ONLY=1 . "$1"
+        [ -n "${_prune_rendezvous_letters_script:-}" ] &&
+            [[ "$_prune_rendezvous_letters_script" == *"$2"* ]]
+    ' _ "$SCRIPT" 'rm -f -- "./$name"'
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

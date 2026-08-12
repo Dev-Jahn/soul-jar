@@ -135,7 +135,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version is 0.10.1" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.1"
+assert "plugin version is 0.10.3" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.3"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
 assert_grep "the wake room is in the files table" "wake/ " README.md

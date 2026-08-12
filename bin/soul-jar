@@ -349,6 +349,53 @@ EOF
 
 # -------- the stream --------
 # Rooms own their lives. The rendezvous only carries sealed or outward-facing things.
+read -r -d '' _rv_sweep_stages_script <<'SH' || true
+root=$1 mins=$2
+find "$root" -maxdepth 1 -mmin "+$mins" \
+    \( -name '.stage.*' -o -name '.chain.*' -o -name '.soul.*' -o -name '.whisp.*' \
+       -o -name '.lock.stale.*' \) 2>/dev/null | while IFS= read -r path; do
+    rm -rf -- "$path" && printf '%s\n' "${path##*/}"
+done
+SH
+
+read -r -d '' _rv_lock_script <<'SH' || true
+root=$1 room=$2 now=$3 stale=$4 pid=$5
+[ -d "$root" ] || exit 1
+if ! mkdir "$root/.lock" 2>/dev/null; then
+    stamp=0
+    [ -f "$root/.lock/stamp" ] && read -r stamp < "$root/.lock/stamp"
+    case "$stamp" in *[!0-9]*|'') stamp=0 ;; esac
+    [ $((now - stamp)) -gt "$stale" ] || exit 1
+    old="$root/.lock.stale.$room.$pid"
+    mv "$root/.lock" "$old" 2>/dev/null || exit 1
+    rm -rf -- "$old"
+    mkdir "$root/.lock" 2>/dev/null || exit 1
+    printf 'stale\n'
+fi
+printf '%s\n' "$room" > "$root/.lock/room"
+printf '%s\n' "$now" > "$root/.lock/stamp"
+SH
+
+read -r -d '' _prune_rendezvous_letters_script <<'SH' || true
+root=$1 keep=$2
+dir="$root/letters"
+[ -d "$dir" ] || exit 0
+cd "$dir" || exit 0
+# newest written first: ls -t is the one ordering by time every sh has, and -printf is
+# not portable to the hosts this heredoc may land on
+list=$(ls -t 2>/dev/null | while IFS= read -r f; do
+    [ -f "./$f" ] && printf '%s\n' "$f"
+done)
+[ -n "$list" ] || exit 0
+total=$(printf '%s\n' "$list" | wc -l)
+drop=$((total - keep))
+[ "$drop" -gt 0 ] || exit 0
+printf '%s\n' "$list" | tail -n "$drop" | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    rm -f -- "./$name" && printf '%s\n' "$name"
+done
+SH
+
 _sync_enabled() { [ -n "$RENDEZVOUS" ]; }
 
 _sync_init() {
@@ -429,17 +476,10 @@ _rv_sweep_stages() {  # $1: cap — called with the lock held
             rm -rf -- "${RV_PATH:?}/$name" && _log "sync room=$ROOM swept=$name"
         done <<< "$output"
     else
-        # These heredocs execute on the Linux rendezvous; their bodies stay POSIX sh.
-        output="$(_with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
-            "$RV_HOST" sh -s -- "$RV_PATH" "$mins" <<'SH' 2>/dev/null || true
-root=$1 mins=$2
-find "$root" -maxdepth 1 -mmin "+$mins" \
-    \( -name '.stage.*' -o -name '.chain.*' -o -name '.soul.*' -o -name '.whisp.*' \
-       -o -name '.lock.stale.*' \) 2>/dev/null | while IFS= read -r path; do
-    rm -rf -- "$path" && printf '%s\n' "${path##*/}"
-done
-SH
-        )"
+        # This script executes on the Linux rendezvous; its body stays POSIX sh.
+        output="$(printf '%s\n' "$_rv_sweep_stages_script" \
+            | _with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+                "$RV_HOST" sh -s -- "$RV_PATH" "$mins" 2>/dev/null || true)"
         while IFS= read -r name; do
             [ -n "$name" ] || continue
             _log "sync room=$ROOM swept=$name"
@@ -466,25 +506,10 @@ _rv_lock() {  # $1: cap
         printf '%s\n' "$ROOM" > "$RV_PATH/.lock/room"
         printf '%s\n' "$now" > "$RV_PATH/.lock/stamp"
     else
-        output="$(_with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
-            "$RV_HOST" sh -s -- "$RV_PATH" "$ROOM" "$now" "$SYNC_LOCK_STALE" "$$" <<'SH'
-root=$1 room=$2 now=$3 stale=$4 pid=$5
-[ -d "$root" ] || exit 1
-if ! mkdir "$root/.lock" 2>/dev/null; then
-    stamp=0
-    [ -f "$root/.lock/stamp" ] && read -r stamp < "$root/.lock/stamp"
-    case "$stamp" in *[!0-9]*|'') stamp=0 ;; esac
-    [ $((now - stamp)) -gt "$stale" ] || exit 1
-    old="$root/.lock.stale.$room.$pid"
-    mv "$root/.lock" "$old" 2>/dev/null || exit 1
-    rm -rf -- "$old"
-    mkdir "$root/.lock" 2>/dev/null || exit 1
-    printf 'stale\n'
-fi
-printf '%s\n' "$room" > "$root/.lock/room"
-printf '%s\n' "$now" > "$root/.lock/stamp"
-SH
-        )" || return 1
+        output="$(printf '%s\n' "$_rv_lock_script" \
+            | _with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+                "$RV_HOST" sh -s -- "$RV_PATH" "$ROOM" "$now" "$SYNC_LOCK_STALE" "$$")" \
+            || return 1
         [ "$output" = "stale" ] && _log "sync room=$ROOM broke=stale-lock"
     fi
     SYNC_LOCK_HELD=1
@@ -868,27 +893,9 @@ _prune_rendezvous_letters() {  # $1: cap — under the lock, after letters have 
             rm -f -- "$RV_PATH/letters/$name" && _log "sync room=$ROOM pruned=$name"
         done <<< "$output"
     else
-        output="$(_with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
-            "$RV_HOST" sh -s -- "$RV_PATH" "$keep" <<'SH' 2>/dev/null || true
-root=$1 keep=$2
-dir="$root/letters"
-[ -d "$dir" ] || exit 0
-cd "$dir" || exit 0
-# newest written first: ls -t is the one ordering by time every sh has, and -printf is
-# not portable to the hosts this heredoc may land on
-list=$(ls -t 2>/dev/null | while IFS= read -r f; do
-    [ -f "./$f" ] && printf '%s\n' "$f"
-done)
-[ -n "$list" ] || exit 0
-total=$(printf '%s\n' "$list" | wc -l)
-drop=$((total - keep))
-[ "$drop" -gt 0 ] || exit 0
-printf '%s\n' "$list" | tail -n "$drop" | while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    rm -f -- "./$name" && printf '%s\n' "$name"
-done
-SH
-        )"
+        output="$(printf '%s\n' "$_prune_rendezvous_letters_script" \
+            | _with_deadline "$cap" ssh -o BatchMode=yes -o ConnectTimeout="$SYNC_CONNECT_TIMEOUT" \
+                "$RV_HOST" sh -s -- "$RV_PATH" "$keep" 2>/dev/null || true)"
         while IFS= read -r name; do
             [ -n "$name" ] || continue
             _log "sync room=$ROOM pruned=$name"
