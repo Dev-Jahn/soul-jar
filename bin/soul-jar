@@ -134,7 +134,7 @@ _iso_to_epoch() {
 
 _flock_mode() {
     [ -z "$FLOCK_MODE" ] || return 0
-    if command -v flock >/dev/null 2>&1; then FLOCK_MODE=command
+    if command -v flock >/dev/null 2>&1; then FLOCK_MODE="command"
     elif command -v perl >/dev/null 2>&1 \
          && perl -MFcntl=:flock -e 'exit 0' >/dev/null 2>&1; then FLOCK_MODE=perl
     else return 1
@@ -164,7 +164,7 @@ _flock() {  # supported forms: -n fd, -w seconds fd
 
 _detach_mode() {
     [ -z "$DETACH_MODE" ] || return 0
-    if command -v setsid >/dev/null 2>&1; then DETACH_MODE=command
+    if command -v setsid >/dev/null 2>&1; then DETACH_MODE="command"
     elif command -v perl >/dev/null 2>&1 \
          && perl -MPOSIX -e 'exit 0' >/dev/null 2>&1; then DETACH_MODE=perl
     else return 1
@@ -2037,7 +2037,9 @@ _stamp_dead_here() {  # $1: stamp; 0 only when death is proven on this host
         recorded_start="$(jq -r 'if (.STARTTIME | type) == "number" then .STARTTIME else empty end' "$stamp" 2>/dev/null || true)"
         [ -n "$recorded_start" ] || return 1
         current_start="$(_ps_start "$pid" 2>/dev/null || true)"
-        [ -n "$current_start" ] || { ! ps -p "$pid" >/dev/null 2>&1; return; }
+        if [ -z "$current_start" ]; then
+            if ps -p "$pid" >/dev/null 2>&1; then return 1; else return 0; fi
+        fi
         [ "$recorded_start" != "$current_start" ]
         return
     fi
@@ -2145,10 +2147,10 @@ _transcripts_oldest() {  # $1: projects root; stdout: NUL-delimited paths by mti
             j=$((i - 1))
             [[ "${mtimes[$j]}" < "$mtime" ]] && break
             if [ "${mtimes[$j]}" = "$mtime" ] && [[ "${paths[$j]}" < "$tp" ]]; then break; fi
-            paths[$i]="${paths[$j]}"; mtimes[$i]="${mtimes[$j]}"
+            paths[i]="${paths[$j]}"; mtimes[i]="${mtimes[$j]}"
             i="$j"
         done
-        paths[$i]="$tp"; mtimes[$i]="$mtime"; n=$((n + 1))
+        paths[i]="$tp"; mtimes[i]="$mtime"; n=$((n + 1))
     done < <(find "$root" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -print0 2>/dev/null)
     for ((i = 0; i < n; i++)); do printf '%s\0' "${paths[$i]}"; done
 }

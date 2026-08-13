@@ -17,7 +17,7 @@ export PATH="$TMP/bin:$PATH"
 PASS=0; FAIL=0
 # -------- host portability: the suite itself must run on GNU and BSD alike --------
 # BSD sedi demands an explicit suffix where GNU takes none; one spelling for both.
-sedi() { sed -i.sedi-bak "$@" && rm -f "${@: -1}.sedi-bak"; }
+sedi() { local last="${*: -1}"; sed -i.sedi-bak "$@" && rm -f "$last.sedi-bak"; }
 # macOS ships shasum, not sha256sum; same two-space output shape.
 command -v sha256sum >/dev/null 2>&1 || sha256sum() { shasum -a 256 "$@"; }
 # GNU `stat -c %a` ↔ BSD `stat -f %A`, both bare octal.
@@ -406,13 +406,11 @@ assert_grep "a later dream ends the silence" "a test whisper, round 14" "$SOUL_J
 echo "=== the watch over the living ==="
 HOST="$(uname -n)"
 if [ -d /proc ]; then
-    HAVE_PROC=1
     BTIME="$(awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null || true)"
     SELF_START="$(awk '{ line=$0; sub(/^.*\) /, "", line); split(line, f, " "); print f[20] }' "/proc/$$/stat")"
 else
     # BSD host: the product proves death via ps/sysctl; compute the same spellings here
     # so fabricated stamps speak this host's dialect.
-    HAVE_PROC=0
     BTIME="$(sysctl -n kern.boottime | sed -nE 's/.*sec = ([0-9]+),.*/\1/p')"
     SELF_START="$(LC_ALL=C ps -p $$ -o lstart= | awk '{$1=$1};1')"
     SELF_START="$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$SELF_START" +%s)"
