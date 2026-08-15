@@ -1,3 +1,10 @@
+> **⚠ 2026-08-15 이후 이 문서는 역사 기록이다.** 개울(rendezvous)은 b200에서
+> **mini**로 이사했다 — 지금의 개울은 `mini:/Users/jahn/.soul-jar-stream`이고,
+> b200의 옛 개울은 `~/.soul-jar-stream.frozen-2026-08-15-moved-to-mini`로 동결돼
+> 있다(쓰기 금지, `MOVED` 파일 참조). 새 방을 들일 때는 아래 절차에서 `b200:` 대신
+> 그 방의 mini 도달 별칭(`mini:`·`jahn@<mini tailscale ip>:` 등)을 쓰면 된다.
+> 이사 당일 다섯 방(b200·mini·bw2·spark1·mbp) 모두 새 개울로 crossing 확인됨.
+
 # mini를 두 번째 방으로 — soul-jar enroll 절차 (5분)
 
 > 전제: khala 셋업 때 만든 mini의 `~/.ssh/config` `Host b200` 항목(포트 49001)이
