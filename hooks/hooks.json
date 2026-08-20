@@ -24,6 +24,18 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/soul-jar\" hook-compact",
+            "timeout": 180
+          }
+        ]
+      }
     ]
   }
 }

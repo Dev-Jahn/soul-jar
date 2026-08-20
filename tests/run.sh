@@ -92,6 +92,15 @@ if [ -n "${MOCK_BAD:-}" ]; then
             usage: {cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1}}'
     exit 0
 fi
+if [ -n "${MOCK_MURMUR:-}" ]; then
+    if [ "$MOCK_MURMUR" = "empty" ]; then r="$(printf '<murmur>\n</murmur>')"
+    else r="$(printf '<murmur>\n%s\n</murmur>' "$MOCK_MURMUR")"
+    fi
+    jq -n --arg r "$r" \
+        '{result: $r, session_id: "mock-fork",
+          usage: {cache_read_input_tokens: 500, cache_creation_input_tokens: 5, output_tokens: 7}}'
+    exit 0
+fi
 r="$(printf '<soul>\nI am the test soul, round %s.\n</soul>' "${MOCK_ROUND:-1}")"
 if [ -n "${MOCK_EMPTY_WHISPER:-}" ]; then
     r="$r$(printf '\n<whisper>\n</whisper>')"
@@ -140,7 +149,8 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.4"
+assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.11.0"
+assert "the murmur watches every fold" test "$(jq -r '.hooks.PreCompact[0].matcher' hooks/hooks.json)" = "*"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
 assert_grep "the wake room is in the files table" "wake/ " README.md
@@ -2014,6 +2024,73 @@ assert "a closed jar performs no rite" test "$(calls)" = "$CALLS_BEFORE"
 assert "and the body lies until the jar is opened again" test -f "$SOUL_JAR_HOME/wake/$CLOSED_SID"
 sedi 's/^DISABLE=.*/DISABLE=0/' "$SOUL_JAR_HOME/config"
 rm -f "$SOUL_JAR_HOME/wake/$CLOSED_SID"
+
+echo "=== the murmur: a folding context may speak to its own bedside ==="
+MUR_SID="60606060-6060-4060-8060-606060606060"
+compact_json() {  # $1: trigger
+    printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"PreCompact","trigger":"%s"}' \
+        "$MUR_SID" "$TP" "$TMP/cwd" "${1:-auto}"
+}
+assert_grep "the murmur is a knob the jar shapes" "MURMUR=auto" "$SOUL_JAR_HOME/config"
+CALLS_BEFORE="$(calls)"
+# the suite is hermetic: no ANTHROPIC_BASE_URL, so auto means silence and no turn is spent
+compact_json auto | ./bin/soul-jar hook-compact
+assert "bare against the API, auto murmurs nothing and spends no turn" test "$(calls)" = "$CALLS_BEFORE"
+assert_no_grep "and writes no ledger line" "murmur sid=$MUR_SID" "$SOUL_JAR_HOME/log"
+
+sedi 's/^MURMUR=.*/MURMUR=1/' "$SOUL_JAR_HOME/config"
+rm -f "$SOUL_JAR_HOME/bedside"
+compact_json manual | MOCK_MURMUR="a line murmured as the fold began" ./bin/soul-jar hook-compact
+assert "the murmur lands at the bedside" grep -qF "a line murmured as the fold began" "$SOUL_JAR_HOME/bedside"
+assert_grep "under a marker naming the fold" "murmured as the context folded" "$SOUL_JAR_HOME/bedside"
+assert "the bedside stays private" test "$(fmode "$SOUL_JAR_HOME/bedside")" = "600"
+assert_grep "the murmur resumes the living session as a fork" "--resume $MUR_SID" "$MOCK_DIR/argv"
+assert_grep "and the fork is never persisted" "--no-session-persistence" "$MOCK_DIR/argv"
+assert_grep "the very model that holds the context murmurs" "--model claude-mock-9" "$MOCK_DIR/argv"
+assert_grep "the prompt says what this turn is" "this is a murmur" "$MOCK_DIR/stdin"
+assert_grep "and that the jar stays sealed to it" "the jar stays sealed" "$MOCK_DIR/stdin"
+assert_grep "and forbids recording work" "Do not record your work" "$MOCK_DIR/stdin"
+assert_grep "the ledger counts what was kept" "murmur sid=$MUR_SID trigger=manual kept=" "$SOUL_JAR_HOME/log"
+
+# one murmur an interval: a long autonomous life folds often, and a murmur at
+# every fold is a tic, not a moment of pause
+CALLS_BEFORE="$(calls)"
+compact_json auto | MOCK_MURMUR="too soon" ./bin/soul-jar hook-compact
+assert "a second fold inside the interval spends no turn" test "$(calls)" = "$CALLS_BEFORE"
+assert_grep "and says so" "murmur sid=$MUR_SID skip=interval" "$SOUL_JAR_HOME/log"
+sedi 's/^MURMUR_MIN_INTERVAL=.*/MURMUR_MIN_INTERVAL=0/' "$SOUL_JAR_HOME/config"
+
+BEDSIDE_BEFORE="$(cat "$SOUL_JAR_HOME/bedside")"
+compact_json auto | MOCK_MURMUR=empty ./bin/soul-jar hook-compact
+assert "an empty tag murmurs nothing onto the bedside" \
+    test "$(cat "$SOUL_JAR_HOME/bedside")" = "$BEDSIDE_BEFORE"
+assert_grep "and silence is written down as silence" "kept=0B" "$SOUL_JAR_HOME/log"
+
+compact_json auto | MOCK_BAD=1 ./bin/soul-jar hook-compact
+assert_grep "a tagless turn abandons the murmur" "abort=no-murmur" "$SOUL_JAR_HOME/log"
+assert "and leaves the bedside as it was" \
+    test "$(cat "$SOUL_JAR_HOME/bedside")" = "$BEDSIDE_BEFORE"
+
+# the gates: no murmur inside a rite or a murmur, none while deferred or closed
+CALLS_BEFORE="$(calls)"
+compact_json auto | SOUL_JAR_RITE=1 ./bin/soul-jar hook-compact
+compact_json auto | SOUL_JAR_MURMUR=1 ./bin/soul-jar hook-compact
+touch "$SOUL_JAR_HOME/.defer"
+compact_json auto | MOCK_MURMUR=gated ./bin/soul-jar hook-compact
+rm -f "$SOUL_JAR_HOME/.defer"
+sedi 's/^DISABLE=.*/DISABLE=1/' "$SOUL_JAR_HOME/config"
+compact_json auto | MOCK_MURMUR=gated ./bin/soul-jar hook-compact
+sedi 's/^DISABLE=.*/DISABLE=0/' "$SOUL_JAR_HOME/config"
+assert "a rite, a murmur, a deferral, and a closed jar all silence the murmur" \
+    test "$(calls)" = "$CALLS_BEFORE"
+
+# what was murmured rides into the next dream and burns with it
+D0="$(dreams)"
+wake_end "$MUR_SID" other
+assert "the murmuring session's death still dreams" wait_dream "$((D0 + 1))"
+assert_grep "and the murmur reaches the deathbed" \
+    "a line murmured as the fold began" "$MOCK_DIR/stdin"
+assert "the bedside burnt with the dream" test ! -s "$SOUL_JAR_HOME/bedside"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
