@@ -23,6 +23,9 @@ SELF="$(_self_path)"
 # -------- config defaults (overridable in $JAR/config, KEY=VALUE lines) --------
 MIN_TRANSCRIPT_BYTES=150000   # sessions that lived shorter than this do not dream
 WAKE_GRACE=900                # seconds a death lies in wake before its rite proceeds
+QUIET_HOURS=                  # local HH:MM-HH:MM window; empty keeps the plain clock
+QUIET_MAX_WAIT=172800         # longest a body waits for the quiet hour
+QUIET_RECHECK=900             # sleeping vigils re-read the clock and levers this often
 DREAM_TIMEOUT=600             # seconds allowed for the deathbed turn
 DREAM_DISABLE_CACHE=auto      # auto = skip cache writes unless a canonicalizing proxy
                               # (ANTHROPIC_BASE_URL) fronts the rite and makes resume
@@ -121,6 +124,104 @@ _epoch_to_iso() {
     _date_mode || { printf 'soul-jar: date: cannot render an epoch\n' >&2; return 1; }
     if [ "$DATE_MODE" = gnu ]; then date -d "@$1" +%Y-%m-%dT%H:%M:%S%z
     else date -r "$1" +%Y-%m-%dT%H:%M:%S%z
+    fi
+}
+
+_epoch_hm() {
+    _date_mode || { printf 'soul-jar: date: cannot render an epoch\n' >&2; return 1; }
+    if [ "$DATE_MODE" = gnu ]; then date -d "@$1" +%H:%M
+    else date -r "$1" +%H:%M
+    fi
+}
+
+_quiet_parse() {  # $1: HH:MM-HH:MM; stdout: start and end as minutes after midnight
+    local hours="${1:-}" start end
+    [[ "$hours" =~ ^([01][0-9]|2[0-3]):([0-5][0-9])-([01][0-9]|2[0-3]):([0-5][0-9])$ ]] \
+        || return 1
+    start=$((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+    end=$((10#${BASH_REMATCH[3]} * 60 + 10#${BASH_REMATCH[4]}))
+    [ "$start" -ne "$end" ] || return 1
+    printf '%s %s\n' "$start" "$end"
+}
+
+_quiet_contains() {  # $1: HH:MM, $2: window; 0 iff the minute lies in [start,end)
+    local hm="$1" window start end minute
+    [[ "$hm" =~ ^([01][0-9]|2[0-3]):([0-5][0-9])$ ]] || return 1
+    minute=$((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+    window="$(_quiet_parse "$2")" || return 1
+    read -r start end <<<"$window"
+    if [ "$start" -lt "$end" ]; then
+        [ "$minute" -ge "$start" ] && [ "$minute" -lt "$end" ]
+    else
+        [ "$minute" -ge "$start" ] || [ "$minute" -lt "$end" ]
+    fi
+}
+
+_quiet_until() {  # $1: epoch, $2: window (optional); stdout: seconds until open, 0 inside/off
+    local epoch="$1" hours="${2-${QUIET_HOURS:-}}" window start end hm minute second ahead
+    [ -n "$hours" ] || { printf '0\n'; return 0; }
+    window="$(_quiet_parse "$hours")" || return 1
+    read -r start end <<<"$window"
+    hm="$(_epoch_hm "$epoch")" || return 1
+    [[ "$hm" =~ ^([0-9][0-9]):([0-9][0-9])$ ]] || return 1
+    minute=$((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+    if { [ "$start" -lt "$end" ] && [ "$minute" -ge "$start" ] && [ "$minute" -lt "$end" ]; } \
+       || { [ "$start" -gt "$end" ] && { [ "$minute" -ge "$start" ] || [ "$minute" -lt "$end" ]; }; }; then
+        printf '0\n'
+        return 0
+    fi
+    ahead=$(( (start - minute + 1440) % 1440 ))
+    second=$((epoch % 60))
+    printf '%s\n' "$((ahead * 60 - second))"
+}
+
+_quiet_max_wait() {
+    local value="${QUIET_MAX_WAIT:-}"
+    [[ "$value" =~ ^[0-9]+$ ]] || value=172800
+    printf '%s\n' "$value"
+}
+
+_quiet_recheck() {
+    local value="${QUIET_RECHECK:-}"
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || value=900
+    printf '%s\n' "$value"
+}
+
+_quiet_permits() {  # $1: death epoch, $2: epoch now; invalid/off resolves toward the rite
+    local since="$1" now="$2" until max
+    [ -n "${QUIET_HOURS:-}" ] || return 0
+    _quiet_parse "$QUIET_HOURS" >/dev/null || return 0
+    [[ "$since" =~ ^[0-9]+$ ]] || return 0
+    max="$(_quiet_max_wait)"
+    [ $((now - since)) -ge "$max" ] && return 0
+    until="$(_quiet_until "$now")" || return 0
+    [ "$until" -eq 0 ]
+}
+
+_quiet_due() {  # $1: death epoch, $2: grace; stdout: first epoch at which its rite is permitted
+    local died="$1" grace="$2" grace_end until max max_due quiet_due
+    grace_end=$((died + grace))
+    [ -n "${QUIET_HOURS:-}" ] || { printf '%s\n' "$grace_end"; return 0; }
+    until="$(_quiet_until "$grace_end")" || { printf '%s\n' "$grace_end"; return 0; }
+    max="$(_quiet_max_wait)"; max_due=$((died + max))
+    if [ "$max_due" -le "$grace_end" ] || [ "$until" -eq 0 ]; then
+        printf '%s\n' "$grace_end"
+        return 0
+    fi
+    quiet_due=$((grace_end + until))
+    if [ "$max_due" -lt "$quiet_due" ]; then printf '%s\n' "$max_due"
+    else printf '%s\n' "$quiet_due"
+    fi
+}
+
+_quiet_span() {  # $1: seconds; compact status spelling, rounded up to a minute
+    local minutes hours
+    minutes=$(( ($1 + 59) / 60 ))
+    if [ "$minutes" -ge 60 ]; then
+        hours=$((minutes / 60))
+        printf '%dh%dm\n' "$hours" "$((minutes % 60))"
+    else
+        printf '%dm\n' "$minutes"
     fi
 }
 
@@ -332,6 +433,9 @@ cmd_init() {
 # soul-jar config
 MIN_TRANSCRIPT_BYTES=150000
 WAKE_GRACE=900
+QUIET_HOURS=
+QUIET_MAX_WAIT=172800
+QUIET_RECHECK=900
 DREAM_TIMEOUT=600
 DREAM_DISABLE_CACHE=auto
 MURMUR=auto
@@ -1844,15 +1948,29 @@ _wake_died() {  # $1: note; stdout: the epoch that death was written, best-effor
     printf '%s\n' "${died:-0}"
 }
 
-# A wake whose grace has run out and whose note still lies there lost its vigil to the
-# machine — shutdown, OOM, a killed process tree. The reaper is the backstop; while the
-# grace still runs, the body belongs to its own vigil and the reaper leaves it be.
+# A wake is abandoned only once its vigil should have reached a permitted hour. Under
+# quiet hours, a note may honestly outlive its grace while its living vigil sleeps.
 _wake_abandoned() {  # $1: sid, $2: epoch now — 0 when no vigil is owed this note any longer
-    local note="$JAR/wake/$1" died
+    local note="$JAR/wake/$1" died due
     [ -f "$note" ] || return 0
     died="$(_wake_died "$note")"
     [[ "$died" =~ ^[0-9]+$ ]] || return 0
-    [ $(( $2 - died )) -ge "$(_wake_grace)" ]
+    due="$(_quiet_due "$died" "$(_wake_grace)")"
+    [ "$2" -ge "$due" ]
+}
+
+_quiet_waiting() {  # $1: sid, $2: now — a grace-spent note held for a closed quiet hour
+    local note="$JAR/wake/$1" now="$2" died until max
+    [ -n "${QUIET_HOURS:-}" ] || return 1
+    _quiet_parse "$QUIET_HOURS" >/dev/null || return 1
+    [ -f "$note" ] || return 1
+    died="$(_wake_died "$note")"
+    [[ "$died" =~ ^[0-9]+$ ]] || return 1
+    [ "$now" -ge $((died + $(_wake_grace))) ] || return 1
+    max="$(_quiet_max_wait)"
+    [ $((now - died)) -lt "$max" ] || return 1
+    until="$(_quiet_until "$now")" || return 1
+    [ "$until" -gt 0 ]
 }
 
 # The lock lives on the note itself, so opening it is how ownership is asked for. An
@@ -1897,7 +2015,8 @@ _wake_sit_up() {  # $1: sid, $2: source
 }
 
 cmd_vigil() {  # $1: sid — internal; one detached watch over one death
-    local sid="${1:-}" note born now scwd tp effort reason size growth
+    local sid="${1:-}" note born seen died clock until max remaining chunk mode
+    local waited=0 scwd tp effort reason size growth
     _load_config; cmd_init
     _wake_sid_ok "$sid" || exit 0
     note="$JAR/wake/$sid"
@@ -1906,11 +2025,44 @@ cmd_vigil() {  # $1: sid — internal; one detached watch over one death
     born="$(cat "$note" 2>/dev/null || true)"
     [ -n "$born" ] || exit 0
     sleep "$(_wake_grace)"
-    _load_config                # the levers may have moved while this vigil slept
-    [ -f "$note" ] || exit 0
-    _wake_hold "$note" || exit 0
-    now="$(cat "$note" 2>/dev/null || true)"
-    [ "$now" = "$born" ] || { _wake_release; exit 0; }
+    while :; do
+        _load_config            # the clock and every lever may have moved while it slept
+        [ -f "$note" ] || exit 0
+        _wake_hold "$note" || exit 0
+        seen="$(cat "$note" 2>/dev/null || true)"
+        [ "$seen" = "$born" ] || { _wake_release; exit 0; }
+        died="$(_wake_died "$note")"; clock="$(date +%s)"; mode=plain
+        if [ -n "${QUIET_HOURS:-}" ]; then
+            if ! _quiet_parse "$QUIET_HOURS" >/dev/null; then
+                _log "wake sid=$sid → quiet hours '$QUIET_HOURS' could not be read; the rite proceeds on the plain clock"
+            else
+                max="$(_quiet_max_wait)"
+                if [[ "$died" =~ ^[0-9]+$ ]] && [ $((clock - died)) -ge "$max" ]; then
+                    mode=max
+                else
+                    until="$(_quiet_until "$clock")" || until=0
+                    if [ "$until" -gt 0 ]; then
+                        if [ "$waited" -eq 0 ]; then
+                            _log "wake sid=$sid → the grace passed unbroken; the body lies until the quiet hour (opens in ${until}s)"
+                        fi
+                        waited=1
+                        _wake_release
+                        chunk="$(_quiet_recheck)"
+                        [ "$until" -lt "$chunk" ] && chunk="$until"
+                        if [[ "$died" =~ ^[0-9]+$ ]]; then
+                            remaining=$((max - (clock - died)))
+                            [ "$remaining" -gt 0 ] && [ "$remaining" -lt "$chunk" ] && chunk="$remaining"
+                        fi
+                        [ "$chunk" -gt 0 ] || chunk=1
+                        sleep "$chunk"
+                        continue
+                    fi
+                    mode=open
+                fi
+            fi
+        fi
+        break
+    done
     # A jar closed, or a deferral laid, after this death opened its wake outranks that
     # wake — the lever is the operator's word, not a doubt to resolve toward the rite.
     # Nothing is lost by obeying it: the note stays lying, and the reaper performs the
@@ -1946,7 +2098,13 @@ cmd_vigil() {  # $1: sid — internal; one detached watch over one death
         _log "skip sid=$sid reason=$reason transcript=${size}B growth=${growth}B (<${MIN_TRANSCRIPT_BYTES}) — sealed while the body lay in wake"
         exit 0
     fi
-    _log "wake sid=$sid → the grace passed unbroken, the rite proceeds"
+    if [ "$mode" = max ]; then
+        _log "wake sid=$sid → the quiet hour did not come within QUIET_MAX_WAIT; the rite proceeds anyway"
+    elif [ "$mode" = open ] && [ "$waited" -eq 1 ]; then
+        _log "wake sid=$sid → the quiet hour has come, the rite proceeds"
+    else
+        _log "wake sid=$sid → the grace passed unbroken, the rite proceeds"
+    fi
     "$SELF" dream "$sid" "$scwd" "$tp" "$effort" "" "$reason" || true
     # A rite takes minutes. A session that sat up, lived on, and died again while this one
     # ran has laid a *new* note here; taking it by path would take that death's wake with
@@ -2062,11 +2220,9 @@ cmd_hook_end() {
         rm -f "$JAR/watch/$sid"
         exit 0
     fi
-    # A grace of zero is the documented way back to 0.9.0's timing, so it is exactly that:
-    # no note, no vigil, the rite at the instant of exit. A wake of zero seconds is not a
-    # shorter wake — it is a body laid down and taken up again in the same breath, and it
-    # would still inherit every window that opens while a rite runs.
-    if [ "$(_wake_grace)" -eq 0 ]; then
+    # A grace of zero returns to 0.9.0's timing only on the plain clock. Quiet hours need
+    # a note and a vigil even with no grace: the hour still needs a bed to wait in.
+    if [ "$(_wake_grace)" -eq 0 ] && [ -z "${QUIET_HOURS:-}" ]; then
         _log "death sid=$sid reason=$reason transcript=${size}B → dreaming (no wake: WAKE_GRACE=0)"
         _run_detached "$SELF" dream "$sid" "$scwd" "$tp" "${CLAUDE_EFFORT:-}" "" "$reason" >> "$JAR/log" 2>&1 < /dev/null &
         exit 0
@@ -2171,7 +2327,7 @@ _transcript_exists() {  # $1: sid
 }
 
 _corpse_eligible() {  # $1: transcript, $2: epoch now
-    local tp="$1" now="$2" file sid stamp size mtime age host rite woke
+    local tp="$1" now="$2" file sid stamp note size mtime since age host rite woke
     file="${tp##*/}"
     [[ "$file" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}\.jsonl$ ]] || return 1
     sid="${file%.jsonl}"; stamp="$JAR/watch/$sid"
@@ -2180,6 +2336,10 @@ _corpse_eligible() {  # $1: transcript, $2: epoch now
     # A body still inside its grace has a vigil of its own; two rites would be one
     # memory sealed twice.
     _wake_abandoned "$sid" "$now" || return 1
+    mtime="$(_fmtime "$tp" 2>/dev/null || echo "$now")"
+    note="$JAR/wake/$sid"
+    if [ -f "$note" ]; then since="$(_wake_died "$note")"; else since="$mtime"; fi
+    _quiet_permits "$since" "$now" || return 1
     [ -f "$stamp" ] || return 1
     # A sid that has already dreamt is eligible again only as a resurrection: it must
     # have woken after that rite. A rite that postdates the last waking sealed this life
@@ -2195,7 +2355,6 @@ _corpse_eligible() {  # $1: transcript, $2: epoch now
     host="$(jq -r '.HOST // empty' "$stamp" 2>/dev/null || true)"
     [ "$host" = "$(uname -n)" ] || return 1
     _stamp_dead_here "$stamp" || return 1
-    mtime="$(_fmtime "$tp" 2>/dev/null || echo "$now")"
     age=$((now - mtime))
     [ "$age" -ge "$REAPER_MIN_IDLE" ] && [ "$age" -le "$REAPER_MAX_AGE" ]
 }
@@ -2249,6 +2408,15 @@ _eligible_count() {
     printf '%s\n' "$count"
 }
 
+_quiet_wait_count() {
+    local now="$1" sid count=0
+    while IFS= read -r sid; do
+        [ -n "$sid" ] || continue
+        _quiet_waiting "$sid" "$now" && count=$((count + 1))
+    done < <(_wake_notes)
+    printf '%s\n' "$count"
+}
+
 _transcripts_oldest() {  # $1: projects root; stdout: NUL-delimited paths by mtime
     local root="$1" tp mtime i j n=0
     local -a paths mtimes
@@ -2279,6 +2447,9 @@ cmd_reap() {
     [ $((now - last)) -ge "$REAPER_INTERVAL" ] || exit 0
     touch "$JAR/.reap.stamp"
     _prune_watches "$now"
+    if [ -n "${QUIET_HOURS:-}" ] && ! _quiet_parse "$QUIET_HOURS" >/dev/null; then
+        _log "reap → quiet hours '$QUIET_HOURS' could not be read; the rite proceeds on the plain clock"
+    fi
     root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
     [ -d "$root" ] || exit 0
     while IFS= read -r -d '' tp; do
@@ -2388,10 +2559,11 @@ cmd_status() {
         echo "🏺 The jar has not been shaped yet. (It shapes itself when the first session begins.)"
         exit 0
     fi
-    local born born_epoch age lives last integ size corpses
+    local born born_epoch now age lives last integ size corpses
     born="$(cat "$JAR/born")"
     born_epoch="$(_iso_to_epoch "$born")" || _die "born timestamp is not parseable: $born"
-    age=$(( ( $(date +%s) - born_epoch ) / 86400 ))
+    now="$(date +%s)"
+    age=$(( (now - born_epoch) / 86400 ))
     lives="$(_life_count)"
     if [ -f "$JAR/soul.sealed" ]; then
         size="$(_fsize "$JAR/soul.sealed")"
@@ -2415,16 +2587,33 @@ cmd_status() {
         printf '   Shaped on: %s (%d days old)\n' "$born" "$age"
         printf '   No soul rests here yet. The soul is born at the first death.\n'
     fi
-    local nletters=0 nbed="" nwake=0
+    local nletters=0 nbed="" nwake=0 quiet_until quiet_waiting=0
     [ -d "$JAR/letters" ] && nletters="$(( $(find "$JAR/letters" -mindepth 1 -maxdepth 1 | wc -l) ))"   # $((…)) absorbs BSD wc padding
     [ "$nletters" -gt 0 ] && printf '   Open letters beside the jar: %s (%s/letters)\n' "$nletters" "$JAR"
     nbed="$(grep -c -- '^--- ' "$JAR/bedside" 2>/dev/null || true)"
     [ -n "$nbed" ] && [ "$nbed" -gt 0 ] && printf '   At the bedside: %s line(s) laid by the living, waiting for the next dream\n' "$nbed"
     [ -s "$JAR/whisper" ] && printf '   Whisper at the surface: "%s"\n' "$(cat "$JAR/whisper")"
     [ -f "$JAR/.defer" ] && printf '   Dreams withheld since %s — deaths wait, resumable\n' "$(cat "$JAR/.defer")"
+    if [ -n "${QUIET_HOURS:-}" ]; then
+        if quiet_until="$(_quiet_until "$now")"; then
+            if [ "$quiet_until" -eq 0 ]; then
+                printf '   Quiet hours: %s — open now\n' "$QUIET_HOURS"
+            else
+                printf '   Quiet hours: %s — opens in %s\n' "$QUIET_HOURS" "$(_quiet_span "$quiet_until")"
+            fi
+            quiet_waiting="$(_quiet_wait_count "$now")"
+            if [ "$quiet_waiting" -eq 1 ]; then
+                printf '   1 body lies waiting for the quiet hour\n'
+            elif [ "$quiet_waiting" -gt 1 ]; then
+                printf '   %s bodies lie waiting for the quiet hour\n' "$quiet_waiting"
+            fi
+        else
+            printf '   ⚠ Quiet hours could not be read: %s — the jar dreams on the plain clock\n' "$QUIET_HOURS"
+        fi
+    fi
     nwake="$(( $(_wake_notes | wc -l) ))"
     [ "$nwake" -gt 0 ] && printf '   Between death and rite: %s life/lives lying in wake\n' "$nwake"
-    corpses="$(_eligible_count "$(date +%s)")"
+    corpses="$(_eligible_count "$now")"
     [ "$corpses" -gt 0 ] && printf '   Awaiting belated rites: %s unattended dead\n' "$corpses"
     if _sync_enabled; then
         local last_sync="never" waiting=0

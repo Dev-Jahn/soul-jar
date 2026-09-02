@@ -222,6 +222,28 @@ BSD_NOW="$(run_helper "$BSD_PATH" _iso_now)"
 assert "the portable current timestamp has an explicit numeric zone" \
     bash -c '[[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}$ ]]' _ "$BSD_NOW"
 
+GNU_HM="$(run_helper "$PATH" _epoch_hm "$EPOCH" 2>/dev/null || true)"
+BSD_HM="$(run_helper "$BSD_PATH" _epoch_hm "$EPOCH" 2>/dev/null || true)"
+assert "BSD date reads the same local hour and minute from an epoch" \
+    bash -c '[ -n "$1" ] && [ "$1" = "$2" ]' _ "$GNU_HM" "$BSD_HM"
+
+helper_status() {  # $1: expected status; the rest is a run_helper invocation
+    local wanted="$1" rc=0; shift
+    run_helper "$PATH" "$@" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq "$wanted" ]
+}
+
+assert "a wrapping quiet window holds 23:30" helper_status 0 _quiet_contains 23:30 23:00-06:00
+assert "a wrapping quiet window holds 05:59" helper_status 0 _quiet_contains 05:59 23:00-06:00
+assert "a wrapping quiet window closes at 06:00" helper_status 1 _quiet_contains 06:00 23:00-06:00
+assert "a wrapping quiet window has not opened at 22:59" helper_status 1 _quiet_contains 22:59 23:00-06:00
+assert "a plain quiet window opens at 02:00" helper_status 0 _quiet_contains 02:00 02:00-07:00
+assert "a plain quiet window closes at 07:00" helper_status 1 _quiet_contains 07:00 02:00-07:00
+assert "a zero-length quiet window cannot be read" helper_status 1 _quiet_parse 03:00-03:00
+assert "an impossible hour cannot be read" helper_status 1 _quiet_parse 25:00-03:00
+assert "words are not quiet hours" helper_status 1 _quiet_parse garbage
+assert "the clock's colons are not optional" helper_status 1 _quiet_parse 0300-0700
+
 echo "=== P6: static choke points ==="
 VIOLATIONS="$TMP/violations"
 awk '
@@ -229,14 +251,14 @@ awk '
         fn = $1; sub(/\(\).*/, "", fn)
     }
     /timeout -k|sha256sum|stat -c|date -I|date -d|readlink -f/ {
-        if (fn !~ /^_(with_deadline|sha256|sha256_mode|stat_mode|fsize|fmtime|fmtime_key|date_mode|epoch_to_iso|iso_to_epoch|self_path|require_runtime)$/)
+        if (fn !~ /^_(with_deadline|sha256|sha256_mode|stat_mode|fsize|fmtime|fmtime_key|date_mode|epoch_to_iso|epoch_hm|iso_to_epoch|self_path|require_runtime)$/)
             print FNR ":" $0
     }
     /^}/ { fn = "" }
 ' "$SCRIPT" > "$VIOLATIONS"
 assert "GNU-only spellings occur only in portability helpers" test ! -s "$VIOLATIONS"
-assert "the plugin version is 0.10.4" \
-    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.10.4"
+assert "the plugin version is 0.12.0" \
+    test "$(jq -r .version .claude-plugin/plugin.json)" = "0.12.0"
 
 echo "=== P7: no heredoc inside command substitution ==="
 HEREDOC_SUB_VIOLATIONS="$TMP/heredoc-substitution-violations"

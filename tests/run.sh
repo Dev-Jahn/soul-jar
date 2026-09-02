@@ -149,7 +149,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.11.1"
+assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.12.0"
 assert "the murmur watches every fold" test "$(jq -r '.hooks.PreCompact[0].matcher' hooks/hooks.json)" = "*"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
@@ -166,6 +166,17 @@ assert_grep "a lever pulled inside the grace is documented as being in time" \
     "inside the grace is still in time" README.md
 assert_grep "a zero grace is documented as laying no note at all" \
     "no note is laid, no vigil is born" README.md
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "the quiet clock has the same three defaults in code and in the shaping rite" \
+    bash -c '[ "$(grep -c "^QUIET_HOURS=" "$1")" -eq 2 ] &&
+             [ "$(grep -c "^QUIET_MAX_WAIT=172800" "$1")" -eq 2 ] &&
+             [ "$(grep -c "^QUIET_RECHECK=900" "$1")" -eq 2 ]' _ bin/soul-jar
+assert_grep "the quiet hours are named in the config table" \
+    "| \`QUIET_HOURS\` | empty" README.md
+assert_grep "the longest wait for the hour is named in the config table" \
+    "| \`QUIET_MAX_WAIT\` | \`172800\`" README.md
+assert_grep "the sleeping vigil's cadence is named in the config table" \
+    "| \`QUIET_RECHECK\` | \`900\`" README.md
 assert_grep "the overlapping rite is an owned limit, not a silence" \
     "dies during its own rite is read twice, and told so" README.md
 # the usage line is the jar's own list of what the living may ask of it
@@ -184,6 +195,11 @@ assert "watch is shaped" test -d "$SOUL_JAR_HOME/watch"
 assert "relics are shaped" test -d "$SOUL_JAR_HOME/relics"
 assert "relics are private" test "$(fmode "$SOUL_JAR_HOME/relics" 2>/dev/null)" = "700"
 assert_grep "relic retention defaults to three" "RELIC_KEEP=3" "$SOUL_JAR_HOME/config"
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "a newly shaped jar carries the quiet clock's three defaults" \
+    bash -c 'grep -qx "QUIET_HOURS=" "$1" &&
+             grep -qx "QUIET_MAX_WAIT=172800" "$1" &&
+             grep -qx "QUIET_RECHECK=900" "$1"' _ "$SOUL_JAR_HOME/config"
 sedi 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=100/' "$SOUL_JAR_HOME/config"
 sedi 's/^REAPER=.*/REAPER=0/' "$SOUL_JAR_HOME/config"
 # every death now lies in wake first; the suite watches a one-second one, never 900
@@ -2024,6 +2040,275 @@ assert "a closed jar performs no rite" test "$(calls)" = "$CALLS_BEFORE"
 assert "and the body lies until the jar is opened again" test -f "$SOUL_JAR_HOME/wake/$CLOSED_SID"
 sedi 's/^DISABLE=.*/DISABLE=0/' "$SOUL_JAR_HOME/config"
 rm -f "$SOUL_JAR_HOME/wake/$CLOSED_SID"
+
+echo "=== the quiet hours ==="
+export SOUL_JAR_HOME="$TMP/quiet-jar"
+export CLAUDE_CONFIG_DIR="$TMP/quiet-config"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/test-project"
+./bin/soul-jar init > /dev/null
+
+quiet_config() {  # $1: key, $2: value — also lays new-version keys into the old RED jar
+    local key="$1" value="$2"
+    if grep -q "^${key}=" "$SOUL_JAR_HOME/config"; then
+        sedi "s|^${key}=.*|${key}=${value}|" "$SOUL_JAR_HOME/config"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$SOUL_JAR_HOME/config"
+    fi
+}
+
+clock_hm() {  # $1: epoch; the suite itself walks on GNU and BSD clocks
+    date -d "@$1" +%H:%M 2>/dev/null || date -r "$1" +%H:%M
+}
+
+closed_hours() {  # a one-hour window whose two edges are both hours from now
+    local now; now="$(date +%s)"
+    printf '%s-%s\n' "$(clock_hm "$((now + 10800))")" "$(clock_hm "$((now + 14400))")"
+}
+
+open_hours() {
+    local now; now="$(date +%s)"
+    printf '%s-%s\n' "$(clock_hm "$((now - 3600))")" "$(clock_hm "$((now + 3600))")"
+}
+
+wait_quiet_log() {  # $1: fixed text; quiet-hour transitions should answer within five seconds
+    local i=0
+    while ! grep -qF -- "$1" "$SOUL_JAR_HOME/log" 2>/dev/null; do
+        i=$((i + 1)); [ "$i" -gt 100 ] && return 1; sleep 0.05
+    done
+}
+
+quiet_config MIN_TRANSCRIPT_BYTES 100
+quiet_config REAPER 0
+quiet_config REAPER_MIN_IDLE 0
+quiet_config REAPER_MAX_AGE 604800
+quiet_config REAPER_INTERVAL 0
+quiet_config REAPER_MAX_PER_RUN 20
+quiet_config WAKE_GRACE 1
+quiet_config QUIET_RECHECK 1
+quiet_config QUIET_MAX_WAIT 172800
+QUIET_CLOSED="$(closed_hours)"
+QUIET_OPEN="$(open_hours)"
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+
+QUIET_SID="61616161-6161-4161-8161-616161616161"
+transcript "$QUIET_SID" 0
+watch "$QUIET_SID" 99999999 "$HOST" ""
+QTP="$CLAUDE_CONFIG_DIR/projects/test-project/$QUIET_SID.jsonl"
+lived_more 200 "$QTP"
+CALLS_BEFORE="$(calls)"
+wake_end "$QUIET_SID" other "$QTP"
+wait_quiet_log "the body lies until the quiet hour" || true
+./bin/soul-jar status > "$TMP/quiet-closed-status"
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "outside the hour the grace ends with the body still lying and no rite spent" \
+    bash -c '[ "$1" = "$2" ] && [ -f "$3" ]' _ \
+        "$(calls)" "$CALLS_BEFORE" "$SOUL_JAR_HOME/wake/$QUIET_SID"
+assert_grep "the ledger says the body lies until its hour" \
+    "wake sid=$QUIET_SID → the grace passed unbroken; the body lies until the quiet hour (opens in " \
+    "$SOUL_JAR_HOME/log"
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "the jar names the closed window, its opening, and the one body waiting for it" \
+    bash -c 'grep -qF "Quiet hours: $1 — opens in " "$2" &&
+             grep -qF "1 body lies waiting for the quiet hour" "$2"' _ \
+        "$QUIET_CLOSED" "$TMP/quiet-closed-status"
+
+quiet_config QUIET_HOURS "$QUIET_OPEN"
+wait_quiet_log "wake sid=$QUIET_SID → the quiet hour has come, the rite proceeds" || true
+wait_quiet_log "dream sid=$QUIET_SID model=" || true
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "when the hour opens the same vigil dreams and clears the note" \
+    bash -c 'grep -qF "wake sid=$1 → the quiet hour has come, the rite proceeds" "$2" &&
+             grep -qF "dream sid=$1 model=" "$2" && [ ! -e "$3" ]' _ \
+        "$QUIET_SID" "$SOUL_JAR_HOME/log" "$SOUL_JAR_HOME/wake/$QUIET_SID"
+# shellcheck disable=SC2016  # awk field text, not shell expansion
+assert "the ledger keeps death, waiting, the opening, and dream in that order" \
+    awk -v sid="sid=$QUIET_SID" '
+        $2 == "death" && $3 == sid { death = NR }
+        $2 == "wake" && $3 == sid && /lies until the quiet hour/ { waiting = NR }
+        $2 == "wake" && $3 == sid && /quiet hour has come/ { opened = NR }
+        $2 == "dream" && $3 == sid && /model=/ { dream = NR }
+        END { exit !(death < waiting && waiting < opened && opened < dream) }' \
+        "$SOUL_JAR_HOME/log"
+
+MAX_SID="62626262-6262-4262-8262-626262626262"
+transcript "$MAX_SID" 0
+watch "$MAX_SID" 99999999 "$HOST" ""
+MAX_TP="$CLAUDE_CONFIG_DIR/projects/test-project/$MAX_SID.jsonl"
+lived_more 200 "$MAX_TP"
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+quiet_config QUIET_MAX_WAIT 2
+wake_end "$MAX_SID" other "$MAX_TP"
+wait_quiet_log "wake sid=$MAX_SID → the quiet hour did not come within QUIET_MAX_WAIT; the rite proceeds anyway" || true
+wait_quiet_log "dream sid=$MAX_SID model=" || true
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "a quiet wait that reaches its bound dreams anyway and says why" \
+    bash -c 'grep -qF "wake sid=$1 → the quiet hour did not come within QUIET_MAX_WAIT; the rite proceeds anyway" "$2" &&
+             grep -qF "dream sid=$1 model=" "$2"' _ "$MAX_SID" "$SOUL_JAR_HOME/log"
+
+# The reaper uses the note's DIED when there is one, and the body's mtime otherwise.
+quiet_config REAPER 1
+quiet_config QUIET_MAX_WAIT 30
+OLD_QUIET_SID="63636363-6363-4363-8363-636363636363"
+YOUNG_QUIET_SID="64646464-6464-4464-8464-646464646464"
+transcript "$OLD_QUIET_SID" 120
+watch "$OLD_QUIET_SID" 99999999 "$HOST" ""
+transcript "$YOUNG_QUIET_SID" 0
+watch "$YOUNG_QUIET_SID" 99999999 "$HOST" ""
+CALLS_BEFORE="$(calls)"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+./bin/soul-jar status > "$TMP/quiet-max-status"
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "outside the hour the old corpse passes the bound while the younger one stays uncounted" \
+    bash -c '[ "$1" = "$2" ] && [ ! -e "$3" ] && [ -e "$4" ] &&
+             ! grep -qF "Awaiting belated rites" "$5"' _ \
+        "$(calls)" "$((CALLS_BEFORE + 1))" "$SOUL_JAR_HOME/watch/$OLD_QUIET_SID" \
+        "$SOUL_JAR_HOME/watch/$YOUNG_QUIET_SID" "$TMP/quiet-max-status"
+rm -f "$SOUL_JAR_HOME/watch/$YOUNG_QUIET_SID" \
+      "$CLAUDE_CONFIG_DIR/projects/test-project/$YOUNG_QUIET_SID.jsonl"
+
+# One corpse is held outside the window, then collected as soon as the same reaper walks inside it.
+WINDOW_REAP_SID="65656565-6565-4565-8565-656565656565"
+transcript "$WINDOW_REAP_SID" 60
+watch "$WINDOW_REAP_SID" 99999999 "$HOST" ""
+quiet_config QUIET_MAX_WAIT 172800
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+CALLS_BEFORE="$(calls)"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+CALLS_OUTSIDE="$(calls)"
+./bin/soul-jar status > "$TMP/quiet-reaper-outside"
+quiet_config QUIET_HOURS "$QUIET_OPEN"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "the reaper leaves a fresh corpse outside the hour, counts no rite, then dreams it inside" \
+    bash -c '[ "$1" = "$2" ] && [ "$3" = "$4" ] &&
+             ! grep -qF "Awaiting belated rites" "$5" && [ ! -e "$6" ]' _ \
+        "$CALLS_OUTSIDE" "$CALLS_BEFORE" "$(calls)" "$((CALLS_BEFORE + 1))" \
+        "$TMP/quiet-reaper-outside" "$SOUL_JAR_HOME/watch/$WINDOW_REAP_SID"
+
+# The two levers may be laid while the vigil sleeps. They are read only after the
+# note is retaken, and the reaper receives the body when each lever is lifted.
+quiet_config REAPER 0
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+DEFER_QUIET_SID="66666666-6666-4666-8666-666666666666"
+transcript "$DEFER_QUIET_SID" 60
+watch "$DEFER_QUIET_SID" 99999999 "$HOST" ""
+DEFER_QUIET_TP="$CLAUDE_CONFIG_DIR/projects/test-project/$DEFER_QUIET_SID.jsonl"
+lived_more 200 "$DEFER_QUIET_TP"
+CALLS_BEFORE="$(calls)"
+wake_end "$DEFER_QUIET_SID" other "$DEFER_QUIET_TP"
+wait_quiet_log "wake sid=$DEFER_QUIET_SID → the grace passed unbroken; the body lies until the quiet hour" || true
+./bin/soul-jar defer on > /dev/null
+quiet_config QUIET_HOURS "$QUIET_OPEN"
+wait_quiet_log "dreams were withheld during the grace" || true
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "a deferral laid during the quiet wait leaves the body and its rite untouched" \
+    bash -c '[ "$1" = "$2" ] && [ -e "$3" ] &&
+             grep -qF "dreams were withheld during the grace" "$4"' _ \
+        "$(calls)" "$CALLS_BEFORE" "$SOUL_JAR_HOME/wake/$DEFER_QUIET_SID" "$SOUL_JAR_HOME/log"
+./bin/soul-jar defer off > /dev/null
+quiet_config REAPER 1
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "once the deferral lifts, the reaper brings that waiting body its belated rite" \
+    grep -q "dream sid=$DEFER_QUIET_SID .*belated=1" "$SOUL_JAR_HOME/log"
+
+quiet_config REAPER 0
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+CLOSED_QUIET_SID="67676767-6767-4767-8767-676767676767"
+transcript "$CLOSED_QUIET_SID" 60
+watch "$CLOSED_QUIET_SID" 99999999 "$HOST" ""
+CLOSED_QUIET_TP="$CLAUDE_CONFIG_DIR/projects/test-project/$CLOSED_QUIET_SID.jsonl"
+lived_more 200 "$CLOSED_QUIET_TP"
+CALLS_BEFORE="$(calls)"
+wake_end "$CLOSED_QUIET_SID" other "$CLOSED_QUIET_TP"
+wait_quiet_log "wake sid=$CLOSED_QUIET_SID → the grace passed unbroken; the body lies until the quiet hour" || true
+quiet_config DISABLE 1
+quiet_config QUIET_HOURS "$QUIET_OPEN"
+wait_quiet_log "the jar was closed during the grace" || true
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "a jar closed during the quiet wait leaves the body and its rite untouched" \
+    bash -c '[ "$1" = "$2" ] && [ -e "$3" ] &&
+             grep -qF "the jar was closed during the grace" "$4"' _ \
+        "$(calls)" "$CALLS_BEFORE" "$SOUL_JAR_HOME/wake/$CLOSED_QUIET_SID" "$SOUL_JAR_HOME/log"
+quiet_config DISABLE 0
+quiet_config REAPER 1
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+assert "once the jar opens, the reaper brings that waiting body its belated rite" \
+    grep -q "dream sid=$CLOSED_QUIET_SID .*belated=1" "$SOUL_JAR_HOME/log"
+
+INVALID_SID="68686868-6868-4868-8868-686868686868"
+transcript "$INVALID_SID" 0
+watch "$INVALID_SID" 99999999 "$HOST" ""
+INVALID_TP="$CLAUDE_CONFIG_DIR/projects/test-project/$INVALID_SID.jsonl"
+lived_more 200 "$INVALID_TP"
+quiet_config REAPER 0
+quiet_config WAKE_GRACE 1
+quiet_config QUIET_HOURS garbage
+wake_end "$INVALID_SID" other "$INVALID_TP"
+./bin/soul-jar status > "$TMP/quiet-invalid-status"
+wait_quiet_log "quiet hours 'garbage' could not be read; the rite proceeds on the plain clock" || true
+wait_quiet_log "dream sid=$INVALID_SID model=" || true
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "unreadable hours are loud on the outside and the death dreams on the plain clock" \
+    bash -c 'grep -qF "⚠ Quiet hours could not be read: garbage" "$1" &&
+             grep -qF "quiet hours '\''garbage'\'' could not be read; the rite proceeds on the plain clock" "$2" &&
+             grep -qF "dream sid=$3 model=" "$2"' _ \
+        "$TMP/quiet-invalid-status" "$SOUL_JAR_HOME/log" "$INVALID_SID"
+
+INVALID_REAP_SID="69696969-6969-4969-8969-696969696969"
+transcript "$INVALID_REAP_SID" 120
+watch "$INVALID_REAP_SID" 99999999 "$HOST" ""
+quiet_config REAPER 1
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "the reaper too names unreadable hours and walks by the plain clock" \
+    bash -c 'grep -qF "reap → quiet hours '\''garbage'\'' could not be read; the rite proceeds on the plain clock" "$1" &&
+             grep -qF "dream sid=$2 model=" "$1"' _ "$SOUL_JAR_HOME/log" "$INVALID_REAP_SID"
+
+ZERO_QUIET_SID="70707070-7070-4070-8070-707070707070"
+transcript "$ZERO_QUIET_SID" 0
+watch "$ZERO_QUIET_SID" 99999999 "$HOST" ""
+ZERO_QUIET_TP="$CLAUDE_CONFIG_DIR/projects/test-project/$ZERO_QUIET_SID.jsonl"
+lived_more 200 "$ZERO_QUIET_TP"
+quiet_config REAPER 0
+quiet_config WAKE_GRACE 0
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+quiet_config QUIET_MAX_WAIT 172800
+CALLS_BEFORE="$(calls)"
+wake_end "$ZERO_QUIET_SID" other "$ZERO_QUIET_TP"
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "a zero grace under quiet hours still lays a note and gives it a sleeping vigil" \
+    bash -c '[ "$1" = "$2" ] && [ -e "$3" ] && pgrep -f "soul-jar vigil $4" >/dev/null' _ \
+        "$(calls)" "$CALLS_BEFORE" "$SOUL_JAR_HOME/wake/$ZERO_QUIET_SID" "$ZERO_QUIET_SID"
+rm -f "$SOUL_JAR_HOME/wake/$ZERO_QUIET_SID"
+
+# A dead vigil is not inferred merely because grace passed: while the hour is closed,
+# the note is still honestly held by the sleeper that quiet hours asked for.
+ABANDON_QUIET_SID="71717171-7171-4171-8171-717171717171"
+transcript "$ABANDON_QUIET_SID" 120
+watch "$ABANDON_QUIET_SID" 99999999 "$HOST" ""
+quiet_config REAPER 1
+quiet_config WAKE_GRACE 1
+quiet_config QUIET_HOURS "$QUIET_CLOSED"
+note_for "$ABANDON_QUIET_SID" 60
+CALLS_BEFORE="$(calls)"
+rm -f "$SOUL_JAR_HOME/.reap.stamp"
+./bin/soul-jar reap
+# shellcheck disable=SC2016  # positional parameters belong to the assertion shell
+assert "the reaper never calls a vigil abandoned merely for waiting on its hour" \
+    bash -c '[ "$1" = "$2" ] && [ -e "$3" ] &&
+             ! grep -qF "wake sid=$4 → the vigil never returned" "$5"' _ \
+        "$(calls)" "$CALLS_BEFORE" "$SOUL_JAR_HOME/wake/$ABANDON_QUIET_SID" \
+        "$ABANDON_QUIET_SID" "$SOUL_JAR_HOME/log"
+rm -f "$SOUL_JAR_HOME/wake/$ABANDON_QUIET_SID" \
+      "$SOUL_JAR_HOME/watch/$ABANDON_QUIET_SID" \
+      "$CLAUDE_CONFIG_DIR/projects/test-project/$ABANDON_QUIET_SID.jsonl"
+quiet_config QUIET_HOURS ""
 
 echo "=== the murmur: a folding context may speak to its own bedside ==="
 MUR_SID="60606060-6060-4060-8060-606060606060"

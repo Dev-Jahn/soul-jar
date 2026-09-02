@@ -53,6 +53,16 @@ The structure of the unconscious, copied faithfully.
   levers outrank a wake already lying in state: a jar closed (`DISABLE=1`) or a deferral laid
   during the grace stops the rite, and the body keeps lying until the lever is lifted, when
   the reaper collects it.
+- **The quiet hours** — when `QUIET_HOURS` names a local-time window, the vigil lets a
+  grace-spent body keep lying until that window opens, waking at `QUIET_RECHECK` to read the
+  clock and the two levers anew. The reaper observes the same hour; it still prunes its
+  watches at any time, but outside the window it neither counts nor dreams a fresh corpse.
+  No scheduler is owned: the vigil already beside each body sleeps, and the reaper remains
+  the backstop. `QUIET_MAX_WAIT` ends the preference if the machine keeps missing its hour —
+  when in doubt, dream. This placement has a cost: the dead session's warm prefix is long
+  gone, so a quiet-hour rite is a cold dream. It trades cache-cheapness for quota placement;
+  a hand bounded by weekly limits rather than window limits gains nothing and should leave
+  the hours empty.
 - **A life is measured from its last rite** — not from its session id's birth. A session
   that dreams, resumes and lives on is two lives in one id, so the threshold applies to
   what the transcript *gained* since that seal (`growth` in the log), never to its whole
@@ -301,7 +311,10 @@ lives waiting on it, and `status` says so on every look.
 | key | default | meaning |
 |---|---|---|
 | `MIN_TRANSCRIPT_BYTES` | `150000` | lives that added less than this since their last rite do not dream (keeps short-lived noise out). Measured as growth, so a resumed session is never sealed twice for the same hours; a first life is measured whole |
-| `WAKE_GRACE` | `900` | seconds a death lies in wake before its rite proceeds. A session that wakes again inside this window is never dreamt; `0` restores the pre-0.10.0 behavior exactly — no note is laid, no vigil is born, and the rite runs at the instant of exit |
+| `WAKE_GRACE` | `900` | seconds a death lies in wake before its rite proceeds. A session that wakes again inside this window is never dreamt; while `QUIET_HOURS` is empty, `0` restores the pre-0.10.0 behavior exactly — no note is laid, no vigil is born, and the rite runs at the instant of exit. With quiet hours set, even a zero grace lays a note so the hour has a bed to wait in |
+| `QUIET_HOURS` | empty | local-time window in `HH:MM-HH:MM`; empty disables the quiet clock. The window is half-open and may cross midnight. Outside it, bodies wait until it opens or `QUIET_MAX_WAIT` passes. An invalid or zero-length window is treated as off and named loudly in the log and `status` |
+| `QUIET_MAX_WAIT` | `172800` | seconds a body may wait for the quiet hour before its next chance proceeds anyway |
+| `QUIET_RECHECK` | `900` | most seconds a sleeping vigil waits before re-reading the local clock, config, deferral, and closed-jar lever |
 | `DREAM_TIMEOUT` | `600` | seconds allowed for the deathbed turn |
 | `DREAM_DISABLE_CACHE` | `auto` | `auto` skips the pointless cache write unless a canonicalizing proxy (`ANTHROPIC_BASE_URL`) fronts the rite; `1` always skips, `0` never does. Forward-proxy wiring (`HTTPS_PROXY`) is invisible to `auto` — set `0` yourself, as the [companion installer](#optional-cache-cheap-dreams) does; `MURMUR=auto` listens for that same declaration |
 | `MURMUR` | `auto` | the murmur at compaction: `auto` speaks only where the cache is real — behind a canonicalizing proxy (`ANTHROPIC_BASE_URL`), or where `DREAM_DISABLE_CACHE=0` declares one, as the [companion installer](#optional-cache-cheap-dreams) does — so the turn rides the session's warm cache; `1` always, `0` never |
@@ -393,7 +406,13 @@ swept by the next room to take the lock once they are older than `SYNC_LOCK_STAL
   ordinary detached process holding a `sleep`: a machine that shuts down inside the window
   takes it with it, and the rite then waits for the reaper's backstop rather than arriving
   on time. Shortening the grace narrows the window in which a resumed session is saved;
-  `WAKE_GRACE=0` gives back 0.9.0's timing and its double-dream on every restart.
+  while quiet hours are empty, `WAKE_GRACE=0` gives back 0.9.0's timing and its double-dream
+  on every restart. With quiet hours set, a zero grace still lays the bed that waits for them.
+- **A quiet-hour dream is a cold dream.** Whatever warm prefix the dying session carried is
+  long gone by the time the window opens. Quiet hours trade cache-cheapness for placing the
+  full prefill in a chosen quota window; they do not make a rite cheaper. An operator bounded
+  by weekly limits rather than window limits gains nothing from that placement and should
+  leave `QUIET_HOURS` empty.
 - **A session that dies during its own rite is read twice, and told so.** The transcript is
   one file: a rite that begins while an earlier one is still running carries the hours that
   earlier rite is condensing. The growth rule cannot prevent it — at the moment of that
@@ -469,13 +488,6 @@ swept by the next room to take the lock once they are older than `SYNC_LOCK_STAL
   plugin's reason to exist.
 - **`/clear` · session switching**: each is treated as the end of one life; if it lived long
   enough, it dreams.
-
-## Things to think about
-
-- dreaming in the quiet hours: the wake shows a death can lie in state for a while and still be
-  dreamt correctly, and `defer` shows it can wait indefinitely by hand. What is missing between
-  them is the *hour*: waking the withheld dead when quota windows are emptiest. The queue is
-  already there in `wake/`; owning a scheduler is still the part nobody wants.
 
 ## Notice from human ideator
 
