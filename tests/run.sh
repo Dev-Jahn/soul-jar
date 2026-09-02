@@ -149,7 +149,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.11.0"
+assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.11.1"
 assert "the murmur watches every fold" test "$(jq -r '.hooks.PreCompact[0].matcher' hooks/hooks.json)" = "*"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
@@ -2070,6 +2070,28 @@ compact_json auto | MOCK_BAD=1 ./bin/soul-jar hook-compact
 assert_grep "a tagless turn abandons the murmur" "abort=no-murmur" "$SOUL_JAR_HOME/log"
 assert "and leaves the bedside as it was" \
     test "$(cat "$SOUL_JAR_HOME/bedside")" = "$BEDSIDE_BEFORE"
+
+# forward-proxy wiring (HTTPS_PROXY) is invisible to auto, so the operator declares the
+# cache real with DREAM_DISABLE_CACHE=0 — as the companion installer does — and that one
+# declaration answers for the dream and the murmur alike
+sedi 's/^MURMUR=.*/MURMUR=auto/' "$SOUL_JAR_HOME/config"
+sedi 's/^DREAM_DISABLE_CACHE=.*/DREAM_DISABLE_CACHE=0/' "$SOUL_JAR_HOME/config"
+CALLS_BEFORE="$(calls)"
+compact_json auto | MOCK_MURMUR="spoken where the cache is real" ./bin/soul-jar hook-compact
+assert "where DREAM_DISABLE_CACHE=0 declares the cache real, auto murmurs" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert "and leaves caching on, to ride the warm prefix" test ! -s "$MOCK_DIR/cacheenv"
+assert_grep "the line lands at the bedside" "spoken where the cache is real" "$SOUL_JAR_HOME/bedside"
+sedi 's/^DREAM_DISABLE_CACHE=.*/DREAM_DISABLE_CACHE=1/' "$SOUL_JAR_HOME/config"
+compact_json auto | ANTHROPIC_BASE_URL=http://127.0.0.1:1 MOCK_MURMUR=gated ./bin/soul-jar hook-compact
+assert "DREAM_DISABLE_CACHE=1 silences auto even behind a proxy" \
+    test "$(calls)" = "$((CALLS_BEFORE + 1))"
+assert_no_grep "and nothing reaches the bedside" "gated" "$SOUL_JAR_HOME/bedside"
+sedi 's/^DREAM_DISABLE_CACHE=.*/DREAM_DISABLE_CACHE=auto/' "$SOUL_JAR_HOME/config"
+sedi 's/^MURMUR=.*/MURMUR=1/' "$SOUL_JAR_HOME/config"
+compact_json auto | MOCK_MURMUR="spoken bare" ./bin/soul-jar hook-compact
+assert "MURMUR=1 bare against the API murmurs anyway" test "$(calls)" = "$((CALLS_BEFORE + 2))"
+assert_grep "but skips the cache write it could never read back" "1" "$MOCK_DIR/cacheenv"
 
 # the gates: no murmur inside a rite or a murmur, none while deferred or closed
 CALLS_BEFORE="$(calls)"
