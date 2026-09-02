@@ -480,8 +480,13 @@ swept by the next room to take the lock once they are older than `SYNC_LOCK_STAL
   session automatically. With claude-code-cache-fix carrying an entrypoint-bridge
   extension (Dev-Jahn fork, branch `soul-jar` — the
   [companion installer](#optional-cache-cheap-dreams) sets it up), a rite-shaped fork was
-  measured reading 100% of the dead session's prefix (`read=59172, write=179`) — dreams
-  become cache-cheap for real.
+  measured reading 100% of the dead session's prefix (`read=59172, write=179`) on Claude
+  Code 2.1.221 — dreams become cache-cheap for real. Measured again on 2.1.258 the read
+  had fallen to the static prefix alone (~20%): Claude Code now appends runtime reminders
+  to tool results in the live request that never reach the transcript, so a resume diverges
+  from the first tool result onward, past everything the bridge canonicalizes. Healing that
+  needs the live body mirrored, not just the prefix — open work in the companion, not here.
+  `~/.soul-jar/log` keeps the honest bill either way.
 - **Model extraction**: the dying session's model is read from the transcript, a format with
   no official guarantee. If extraction fails, the dream is abandoned and logged — rather than
   letting another model dream it. A dream dreamt by a different mind would defeat this
