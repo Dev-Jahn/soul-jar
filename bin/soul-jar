@@ -1631,7 +1631,7 @@ cmd_hook_compact() {
     # A murmur buys one bedside line with a resume of the whole living context. Beyond
     # this gate the line cannot repay that prefill, and the fold is allowed to proceed.
     ctx="$(_last_assistant_context "$tp")"
-    [[ "$ctx" =~ ^[0-9]+$ ]] || exit 0
+    [[ "$ctx" =~ ^[0-9]+$ ]] || { _log "murmur sid=$sid trigger=$trigger skip=no-context"; exit 0; }
     if [ "$ctx" -gt "$MURMUR_MAX_CONTEXT" ]; then
         _log "murmur sid=$sid trigger=$trigger skip=context ctx=$ctx"
         exit 0
@@ -1776,7 +1776,7 @@ _predecessor_line() {  # $1: sid; stdout: one line, or nothing
 _dream_abort_count() {  # $1: sid; stdout: aborts since that sid's last successful rite
     [ -f "$JAR/log" ] || { printf '0\n'; return 0; }
     awk -v sid="sid=$1" '
-        $2 == "dream" && $3 == sid {
+        $2 == "dream" && $3 == sid && $0 !~ / abort=lock( |$)/ {
             if ($0 ~ / abort=/) attempts++
             else attempts = 0
         }
@@ -1822,7 +1822,10 @@ cmd_dream() {  # $1 session_id, $2 cwd, $3 transcript_path, $4 effort, $5 belate
     [ "$belated" = "1" ] && rite_note=" belated=1"
     _load_config; cmd_init
     exec 9>"$JAR/lock"
-    _flock -w 900 9 || { _dream_abort "$sid" "$rite_note" "abort=lock"; exit 1; }
+    # A rite that cannot take the jar has spent nothing and failed nothing: another rite
+    # holds it, and this body is owed its turn. So the wait outlasts any one rite in
+    # front of it, and the refusal is written down without being charged as an attempt.
+    _flock -w "$DREAM_TIMEOUT" 9 || { _log "dream sid=$sid${rite_note} abort=lock"; exit 1; }
 
     local model prev_soul integrity out text new_soul new_whisper new_letter usage rite_size
     local bedside bedside_n life lives letter_note relic recovery_life predecessor

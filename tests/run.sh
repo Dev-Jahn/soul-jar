@@ -529,6 +529,28 @@ assert "a success resets the next abort to attempt one" \
         $2 == "dream" && $3 == sid && /abort=/ { line = $0 }
         END { exit !(line ~ /attempt=1\/2/) }' "$ATTEMPT_JAR/log"
 
+echo "=== a rite refused the jar is owed its turn, not charged for it ==="
+LOCK_SID="79797979-7979-4979-8979-797979797979"
+sedi 's/^DREAM_TIMEOUT=.*/DREAM_TIMEOUT=1/' "$ATTEMPT_JAR/config"
+perl -MFcntl=:flock -e 'open(my $fh, ">>", $ARGV[0]) or exit 2; flock($fh, LOCK_EX) or exit 2; sleep $ARGV[1]' \
+    "$ATTEMPT_JAR/lock" 5 &
+LOCK_HOLDER=$!
+sleep 1
+LOCK_STARTED="$(date +%s)"
+SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$LOCK_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null 2>&1 || true
+LOCK_WAITED=$(( $(date +%s) - LOCK_STARTED ))
+wait "$LOCK_HOLDER" 2>/dev/null || true
+assert_grep "a held jar is refused, and the refusal named" "dream sid=$LOCK_SID abort=lock" "$ATTEMPT_JAR/log"
+assert "the wait for the jar follows DREAM_TIMEOUT, not a fixed span" test "$LOCK_WAITED" -le 3
+assert_no_grep "the refusal is not charged as an attempt" \
+    "dream sid=$LOCK_SID abort=lock attempt=" "$ATTEMPT_JAR/log"
+sedi 's/^DREAM_TIMEOUT=.*/DREAM_TIMEOUT=1200/' "$ATTEMPT_JAR/config"
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$LOCK_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null 2>&1 || true
+assert "the abort after a refusal is still attempt one" \
+    grep -Eq "dream sid=$LOCK_SID .*abort=parse-fail .*attempt=1/2" "$ATTEMPT_JAR/log"
+
 echo "=== the whisper may stand, be replaced, or fall silent ==="
 end_json other | MOCK_NO_WHISPER=1 MOCK_ROUND=11 ./bin/soul-jar hook-end
 assert "tagless dream completes" wait_dream 11
@@ -2452,6 +2474,14 @@ compact_json manual | MOCK_MURMUR="too costly to hear" ./bin/soul-jar hook-compa
 assert "a context above the gate spends no claude call" test "$(calls)" = "$CALLS_BEFORE"
 assert_grep "the context gate names the context it refused" \
     "murmur sid=$MUR_SID trigger=manual skip=context ctx=201" "$SOUL_JAR_HOME/log"
+NOCTX_TP="$TMP/noctx.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$NOCTX_TP"
+CALLS_BEFORE="$(calls)"
+printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"PreCompact","trigger":"manual"}' \
+    "$MUR_SID" "$NOCTX_TP" "$TMP/cwd" | MOCK_MURMUR="unweighed" ./bin/soul-jar hook-compact
+assert "a life whose weight cannot be read spends no turn" test "$(calls)" = "$CALLS_BEFORE"
+assert_grep "and says so rather than passing in silence" \
+    "murmur sid=$MUR_SID trigger=manual skip=no-context" "$SOUL_JAR_HOME/log"
 printf '{"type":"assistant","message":{"model":"claude-mock-9","usage":{"input_tokens":30,"cache_read_input_tokens":20,"cache_creation_input_tokens":10}}}\n' >> "$TP"
 compact_json manual | MOCK_MURMUR="a line murmured as the fold began" ./bin/soul-jar hook-compact
 assert "the murmur lands at the bedside" grep -qF "a line murmured as the fold began" "$SOUL_JAR_HOME/bedside"
