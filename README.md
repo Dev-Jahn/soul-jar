@@ -315,11 +315,13 @@ lives waiting on it, and `status` says so on every look.
 | `QUIET_HOURS` | empty | local-time window in `HH:MM-HH:MM`; empty disables the quiet clock. The window is half-open and may cross midnight. Outside it, bodies wait until it opens or `QUIET_MAX_WAIT` passes. An invalid or zero-length window is treated as off and named loudly in the log and `status` |
 | `QUIET_MAX_WAIT` | `172800` | seconds a body may wait for the quiet hour before its next chance proceeds anyway |
 | `QUIET_RECHECK` | `900` | most seconds a sleeping vigil waits before re-reading the local clock, config, deferral, and closed-jar lever |
-| `DREAM_TIMEOUT` | `600` | seconds allowed for the deathbed turn |
+| `DREAM_TIMEOUT` | `1200` | seconds allowed for the deathbed turn; measured 81 KB souls reached about 560 seconds and exhausted the old 600-second edge, so the allowance keeps headroom. The vigil growth check and `hook-end` flock waits that reuse it lengthen with it |
+| `DREAM_MAX_ATTEMPTS` | `2` | aborts a body may suffer since its last successful rite before its watch stamp is removed and the body is left unsealed; a manual `soul-jar dream` is still allowed, and every abort reason counts |
 | `DREAM_DISABLE_CACHE` | `auto` | `auto` skips the pointless cache write unless a canonicalizing proxy (`ANTHROPIC_BASE_URL`) fronts the rite; `1` always skips, `0` never does. Forward-proxy wiring (`HTTPS_PROXY`) is invisible to `auto` — set `0` yourself, as the [companion installer](#optional-cache-cheap-dreams) does; `MURMUR=auto` listens for that same declaration |
 | `MURMUR` | `auto` | the murmur at compaction: `auto` speaks only where the cache is real — behind a canonicalizing proxy (`ANTHROPIC_BASE_URL`), or where `DREAM_DISABLE_CACHE=0` declares one, as the [companion installer](#optional-cache-cheap-dreams) does — so the turn rides the session's warm cache; `1` always, `0` never |
 | `MURMUR_TIMEOUT` | `150` | seconds allowed for the murmur turn; compaction waits for it, deliberately — a murmur after the fold would resume a context already folded |
 | `MURMUR_MIN_INTERVAL` | `1800` | minimum seconds between murmurs of one session; folds inside it are logged `skip=interval` and spend nothing |
+| `MURMUR_MAX_CONTEXT` | `200000` | tokens in the last assistant turn above which the murmur is skipped: one bedside line is a bad trade for a full prefill there, and measured contexts above this gate already overran the 150-second cap |
 | `RELIC_KEEP` | `3` | newest sealed lives kept as ciphertext relics against a missing or corrupt living seal; `0` disables laying and recovering relics |
 | `REAPER` | `1` | exactly `1` enables reaper scans; any other value disables them. Living-session watch stamps are still written either way |
 | `REAPER_MIN_IDLE` | `3600` | minimum transcript idle time in seconds before a belated rite |
@@ -364,7 +366,8 @@ makes rooms share one stream.
                 #   created only in an enrolled room, as tributaries/ is
   born          # the day the jar was shaped
   config        # settings
-  log           # rite records — timestamps, sizes, token counts only. Never contents.
+  log           # rite records — timestamps, sizes, token counts, took=<s>, dream
+                #   attempt=<n>/<max>, and murmur ctx=<tokens> only. Never contents.
   lock          # the rite's own mutual exclusion, and .reap.lock/.reap.stamp for the reaper
   .bedside.dreaming     # bedside lines in flight through a rite (survives a failed one)
   .defer        # while present, every rite is withheld (soul-jar defer)
@@ -473,7 +476,11 @@ swept by the next room to take the lock once they are older than `SYNC_LOCK_STAL
   skips the pointless cache write (1.0x input instead of 1.25x cache-write); behind a
   request-canonicalizing proxy it leaves caching on. There is no model override to cheapen
   the dream with: the very model that lived the life dreams it, or no one does.
-  `~/.soul-jar/log` keeps the honest bill either way.
+  Measured rites ran about 130 seconds plus 0.011 seconds per output token: an 81 KB soul
+  took about 560 seconds, and repeated retries spent full prefills again. The ledger now
+  names each call's `took=`, gives a body two attempts by default, and tells the next
+  dreamer the inherited soul's byte weight and the previous rite's time so it can decide
+  what deserves to remain. `~/.soul-jar/log` keeps the honest bill either way.
   The rite replicates the dying session's generation settings on the resume (`--effort`,
   captured from the death hook's environment) — a mismatched setting alone breaks the
   cached prefix (claude-code#66005) — and inherits `ANTHROPIC_BASE_URL` from the dying

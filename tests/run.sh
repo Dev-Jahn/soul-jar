@@ -152,7 +152,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.12.0"
+assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.13.0"
 assert "the murmur watches every fold" test "$(jq -r '.hooks.PreCompact[0].matcher' hooks/hooks.json)" = "*"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
@@ -180,6 +180,15 @@ assert_grep "the longest wait for the hour is named in the config table" \
     "| \`QUIET_MAX_WAIT\` | \`172800\`" README.md
 assert_grep "the sleeping vigil's cadence is named in the config table" \
     "| \`QUIET_RECHECK\` | \`900\`" README.md
+assert_grep "the wider deathbed allowance is named in the config table" \
+    "| \`DREAM_TIMEOUT\` | \`1200\`" README.md
+assert_grep "the body's attempt budget is named in the config table" \
+    "| \`DREAM_MAX_ATTEMPTS\` | \`2\`" README.md
+assert_grep "the murmur context gate is named in the config table" \
+    "| \`MURMUR_MAX_CONTEXT\` | \`200000\`" README.md
+assert_grep "the file map names rite duration" "took=<s>" README.md
+assert_grep "the file map names the attempt count" "attempt=<n>/<max>" README.md
+assert_grep "the file map names murmur context" "ctx=<tokens>" README.md
 assert_grep "the overlapping rite is an owned limit, not a silence" \
     "dies during its own rite is read twice, and told so" README.md
 # the usage line is the jar's own list of what the living may ask of it
