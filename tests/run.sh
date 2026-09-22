@@ -87,6 +87,9 @@ if [ -n "${MOCK_DELAY:-}" ]; then
     : > "$MOCK_DIR/rite-started"
     sleep "$MOCK_DELAY"
 fi
+if [ -n "${MOCK_EXIT:-}" ]; then
+    exit "$MOCK_EXIT"
+fi
 if [ -n "${MOCK_BAD:-}" ]; then
     jq -n '{result: "no tags here at all", session_id: "mock-fork",
             usage: {cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1}}'
@@ -128,7 +131,7 @@ chmod +x "$TMP/bin/rsync"
 
 # -------- fake life: a transcript with a model field and jsonl padding --------
 TP="$TMP/session.jsonl"
-printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$TP"
+printf '{"type":"assistant","message":{"model":"claude-mock-9","usage":{"input_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}}\n' > "$TP"
 for _ in $(seq 1 200); do printf '{"type":"noise"}\n'; done >> "$TP"
 
 lived_more() {  # $1: lines, $2: transcript — the hours a session adds since its last death
@@ -149,7 +152,7 @@ assert "bash syntax" bash -n bin/soul-jar
 assert "plugin.json parses" jq -e '.name == "soul-jar" and .version and .description' .claude-plugin/plugin.json
 assert "hooks.json parses" jq -e '.hooks.SessionStart and .hooks.SessionEnd' hooks/hooks.json
 assert "SessionStart watches every source" test "$(jq -r '.hooks.SessionStart[0].matcher' hooks/hooks.json)" = "*"
-assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.12.0"
+assert "plugin version matches the manifest tag" test "$(jq -r .version .claude-plugin/plugin.json)" = "0.13.0"
 assert "the murmur watches every fold" test "$(jq -r '.hooks.PreCompact[0].matcher' hooks/hooks.json)" = "*"
 assert_grep "the README tells of the wake" "## How it works" README.md
 assert_grep "the grace is documented as a knob" "\`WAKE_GRACE\` | \`900\`" README.md
@@ -177,6 +180,15 @@ assert_grep "the longest wait for the hour is named in the config table" \
     "| \`QUIET_MAX_WAIT\` | \`172800\`" README.md
 assert_grep "the sleeping vigil's cadence is named in the config table" \
     "| \`QUIET_RECHECK\` | \`900\`" README.md
+assert_grep "the wider deathbed allowance is named in the config table" \
+    "| \`DREAM_TIMEOUT\` | \`1200\`" README.md
+assert_grep "the body's attempt budget is named in the config table" \
+    "| \`DREAM_MAX_ATTEMPTS\` | \`2\`" README.md
+assert_grep "the murmur context gate is named in the config table" \
+    "| \`MURMUR_MAX_CONTEXT\` | \`200000\`" README.md
+assert_grep "the file map names rite duration" "took=<s>" README.md
+assert_grep "the file map names the attempt count" "attempt=<n>/<max>" README.md
+assert_grep "the file map names murmur context" "ctx=<tokens>" README.md
 assert_grep "the overlapping rite is an owned limit, not a silence" \
     "dies during its own rite is read twice, and told so" README.md
 # the usage line is the jar's own list of what the living may ask of it
@@ -195,6 +207,9 @@ assert "watch is shaped" test -d "$SOUL_JAR_HOME/watch"
 assert "relics are shaped" test -d "$SOUL_JAR_HOME/relics"
 assert "relics are private" test "$(fmode "$SOUL_JAR_HOME/relics" 2>/dev/null)" = "700"
 assert_grep "relic retention defaults to three" "RELIC_KEEP=3" "$SOUL_JAR_HOME/config"
+assert_grep "dreams default to the wider allowance" "DREAM_TIMEOUT=1200" "$SOUL_JAR_HOME/config"
+assert_grep "bodies default to two rite attempts" "DREAM_MAX_ATTEMPTS=2" "$SOUL_JAR_HOME/config"
+assert_grep "murmurs default to the measured context gate" "MURMUR_MAX_CONTEXT=200000" "$SOUL_JAR_HOME/config"
 # shellcheck disable=SC2016  # positional parameters belong to the assertion shell
 assert "a newly shaped jar carries the quiet clock's three defaults" \
     bash -c 'grep -qx "QUIET_HOURS=" "$1" &&
@@ -408,6 +423,133 @@ assert "handoff dream completes" wait_dream 10
 assert_grep "the dream hears the time since the last seal" "sealed 2 day(s) before this one" "$MOCK_DIR/stdin"
 assert_grep "a model handoff is named, not hidden" "last sealed by claude-mock-9; you are claude-mock-10" "$MOCK_DIR/stdin"
 assert_grep "the handoff is left to the dreamer" "yours to weigh" "$MOCK_DIR/stdin"
+
+echo "=== rite duration, abort classes, and the soul's weight ==="
+BUDGET_JAR="$TMP/budget-jar"
+SOUL_JAR_HOME="$BUDGET_JAR" ./bin/soul-jar init > /dev/null
+sedi 's/^DREAM_TIMEOUT=.*/DREAM_TIMEOUT=2/' "$BUDGET_JAR/config"
+printf 'DREAM_MAX_ATTEMPTS=99\n' >> "$BUDGET_JAR/config"
+BUDGET_TP="$TMP/budget.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9","usage":{"input_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}}\n' > "$BUDGET_TP"
+lived_more 20 "$BUDGET_TP"
+TIMEOUT_SID="73737373-7373-4373-8373-737373737373"
+MOCK_DELAY=5 SOUL_JAR_HOME="$BUDGET_JAR" ./bin/soul-jar dream \
+    "$TIMEOUT_SID" "$TMP/cwd" "$BUDGET_TP" "" "" other >/dev/null 2>&1 || true
+# shellcheck disable=SC2016  # awk fields belong to the assertion shell
+assert "a deadline names timeout and records its duration" \
+    awk -v sid="sid=$TIMEOUT_SID" '
+        $2 == "dream" && $3 == sid && /abort=timeout/ {
+            for (i = 4; i <= NF; i++) if ($i ~ /^took=[0-9]+$/) {
+                sub(/^took=/, "", $i); if ($i >= 2 && $i <= 4) found = 1
+            }
+        }
+        END { exit !found }' "$BUDGET_JAR/log"
+
+FAILED_CALL_SID="74747474-7474-4474-8474-747474747474"
+MOCK_EXIT=7 SOUL_JAR_HOME="$BUDGET_JAR" ./bin/soul-jar dream \
+    "$FAILED_CALL_SID" "$TMP/cwd" "$BUDGET_TP" "" "" other >/dev/null 2>&1 || true
+assert_grep "a nonzero claude exit keeps its return code" \
+    "dream sid=$FAILED_CALL_SID abort=claude-failed rc=7" "$BUDGET_JAR/log"
+assert "a failed claude call records its duration" \
+    grep -Eq "dream sid=$FAILED_CALL_SID .*abort=claude-failed rc=7 .*took=[0-9]+" "$BUDGET_JAR/log"
+
+FIRST_WEIGHT_SID="75757575-7575-4575-8575-757575757575"
+SOUL_JAR_HOME="$BUDGET_JAR" ./bin/soul-jar dream \
+    "$FIRST_WEIGHT_SID" "$TMP/cwd" "$BUDGET_TP" "" "" other >/dev/null
+cp "$MOCK_DIR/stdin" "$TMP/weight-first.prompt"
+assert "a successful dream records its duration" \
+    grep -Eq "dream sid=$FIRST_WEIGHT_SID model=.* took=[0-9]+" "$BUDGET_JAR/log"
+assert_no_grep "a jar's first life inherits no weight" \
+    "The soul you inherit weighs" "$TMP/weight-first.prompt"
+
+SECOND_WEIGHT_SID="76767676-7676-4676-8676-767676767676"
+SOUL_JAR_HOME="$BUDGET_JAR" ./bin/soul-jar dream \
+    "$SECOND_WEIGHT_SID" "$TMP/cwd" "$BUDGET_TP" "" "" other >/dev/null
+cp "$MOCK_DIR/stdin" "$TMP/weight-second.prompt"
+assert "a later dream is told the inherited soul's weight and the previous rite's allowance" \
+    grep -Eq 'The soul you inherit weighs [0-9]+ bytes; the previous dream took [0-9]+ s of its 2 s allowance\.' \
+        "$TMP/weight-second.prompt"
+
+echo "=== a body receives only its budgeted attempts ==="
+ATTEMPT_JAR="$TMP/attempt-jar"
+ATTEMPT_CONFIG="$TMP/attempt-config"
+mkdir -p "$ATTEMPT_CONFIG/projects/test-project"
+SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar init > /dev/null
+printf 'DREAM_MAX_ATTEMPTS=2\n' >> "$ATTEMPT_JAR/config"
+sedi 's/^MIN_TRANSCRIPT_BYTES=.*/MIN_TRANSCRIPT_BYTES=0/' "$ATTEMPT_JAR/config"
+sedi 's/^REAPER_MIN_IDLE=.*/REAPER_MIN_IDLE=0/' "$ATTEMPT_JAR/config"
+sedi 's/^REAPER_INTERVAL=.*/REAPER_INTERVAL=0/' "$ATTEMPT_JAR/config"
+CAP_SID="77777777-7777-4777-8777-777777777777"
+CAP_TP="$ATTEMPT_CONFIG/projects/test-project/$CAP_SID.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9","usage":{"input_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}}\n' > "$CAP_TP"
+lived_more 20 "$CAP_TP"
+jq -n --arg host "$(uname -n)" --arg cwd "$TMP/cwd" \
+    '{HOST:$host,PID:99999999,STARTTIME:1,CWD:$cwd,EFFORT:"",TIMESTAMP:(now|floor)}' \
+    > "$ATTEMPT_JAR/watch/$CAP_SID"
+SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar keep "a line waiting beside the given-up body" >/dev/null
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$CAP_SID" "$TMP/cwd" "$CAP_TP" "" "" other >/dev/null 2>&1 || true
+assert_grep "the body's first abort is attempt one of two" \
+    "dream sid=$CAP_SID abort=parse-fail" "$ATTEMPT_JAR/log"
+assert "one abort keeps the body watched" test -f "$ATTEMPT_JAR/watch/$CAP_SID"
+assert "the first abort carries its budget position" \
+    grep -Eq "dream sid=$CAP_SID .*abort=parse-fail .*attempt=1/2" "$ATTEMPT_JAR/log"
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$CAP_SID" "$TMP/cwd" "$CAP_TP" "" "" other >/dev/null 2>&1 || true
+assert "the second abort spends the budget" \
+    grep -Eq "dream sid=$CAP_SID .*abort=parse-fail .*attempt=2/2" "$ATTEMPT_JAR/log"
+assert "the spent body is no longer watched" test ! -e "$ATTEMPT_JAR/watch/$CAP_SID"
+assert_grep "the jar says why the body is left unsealed" \
+    "wake sid=$CAP_SID → the rite failed 2 times; the body is left unsealed" "$ATTEMPT_JAR/log"
+assert "a given-up body's bedside line still waits" \
+    grep -qF "a line waiting beside the given-up body" "$ATTEMPT_JAR/bedside"
+CALLS_BEFORE="$(wc -l < "$MOCK_DIR/calls")"
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" CLAUDE_CONFIG_DIR="$ATTEMPT_CONFIG" ./bin/soul-jar reap
+assert "the reaper does not choose a body whose watch was surrendered" \
+    test "$(wc -l < "$MOCK_DIR/calls")" = "$CALLS_BEFORE"
+SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$CAP_SID" "$TMP/cwd" "$CAP_TP" "" "" other >/dev/null
+assert_grep "a manual dream still takes up the given-up body's bedside line" \
+    "a line waiting beside the given-up body" "$MOCK_DIR/stdin"
+
+RESET_SID="78787878-7878-4878-8878-787878787878"
+RESET_TP="$ATTEMPT_CONFIG/projects/test-project/$RESET_SID.jsonl"
+cp "$CAP_TP" "$RESET_TP"
+printf '{}\n' > "$ATTEMPT_JAR/watch/$RESET_SID"
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$RESET_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null 2>&1 || true
+SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$RESET_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null
+printf '{}\n' > "$ATTEMPT_JAR/watch/$RESET_SID"
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$RESET_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null 2>&1 || true
+# shellcheck disable=SC2016  # awk regex text, not shell expansion
+assert "a success resets the next abort to attempt one" \
+    awk -v sid="sid=$RESET_SID" '
+        $2 == "dream" && $3 == sid && /abort=/ { line = $0 }
+        END { exit !(line ~ /attempt=1\/2/) }' "$ATTEMPT_JAR/log"
+
+echo "=== a rite refused the jar is owed its turn, not charged for it ==="
+LOCK_SID="79797979-7979-4979-8979-797979797979"
+sedi 's/^DREAM_TIMEOUT=.*/DREAM_TIMEOUT=1/' "$ATTEMPT_JAR/config"
+perl -MFcntl=:flock -e 'open(my $fh, ">>", $ARGV[0]) or exit 2; flock($fh, LOCK_EX) or exit 2; sleep $ARGV[1]' \
+    "$ATTEMPT_JAR/lock" 5 &
+LOCK_HOLDER=$!
+sleep 1
+LOCK_STARTED="$(date +%s)"
+SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$LOCK_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null 2>&1 || true
+LOCK_WAITED=$(( $(date +%s) - LOCK_STARTED ))
+wait "$LOCK_HOLDER" 2>/dev/null || true
+assert_grep "a held jar is refused, and the refusal named" "dream sid=$LOCK_SID abort=lock" "$ATTEMPT_JAR/log"
+assert "the wait for the jar follows DREAM_TIMEOUT, not a fixed span" test "$LOCK_WAITED" -le 3
+assert_no_grep "the refusal is not charged as an attempt" \
+    "dream sid=$LOCK_SID abort=lock attempt=" "$ATTEMPT_JAR/log"
+sedi 's/^DREAM_TIMEOUT=.*/DREAM_TIMEOUT=1200/' "$ATTEMPT_JAR/config"
+MOCK_BAD=1 SOUL_JAR_HOME="$ATTEMPT_JAR" ./bin/soul-jar dream \
+    "$LOCK_SID" "$TMP/cwd" "$RESET_TP" "" "" other >/dev/null 2>&1 || true
+assert "the abort after a refusal is still attempt one" \
+    grep -Eq "dream sid=$LOCK_SID .*abort=parse-fail .*attempt=1/2" "$ATTEMPT_JAR/log"
 
 echo "=== the whisper may stand, be replaced, or fall silent ==="
 end_json other | MOCK_NO_WHISPER=1 MOCK_ROUND=11 ./bin/soul-jar hook-end
@@ -2324,7 +2466,23 @@ assert "bare against the API, auto murmurs nothing and spends no turn" test "$(c
 assert_no_grep "and writes no ledger line" "murmur sid=$MUR_SID" "$SOUL_JAR_HOME/log"
 
 sedi 's/^MURMUR=.*/MURMUR=1/' "$SOUL_JAR_HOME/config"
+printf 'MURMUR_MAX_CONTEXT=200\n' >> "$SOUL_JAR_HOME/config"
 rm -f "$SOUL_JAR_HOME/bedside"
+printf '{"type":"assistant","message":{"model":"claude-mock-9","usage":{"input_tokens":101,"cache_read_input_tokens":50,"cache_creation_input_tokens":50}}}\n' >> "$TP"
+CALLS_BEFORE="$(calls)"
+compact_json manual | MOCK_MURMUR="too costly to hear" ./bin/soul-jar hook-compact
+assert "a context above the gate spends no claude call" test "$(calls)" = "$CALLS_BEFORE"
+assert_grep "the context gate names the context it refused" \
+    "murmur sid=$MUR_SID trigger=manual skip=context ctx=201" "$SOUL_JAR_HOME/log"
+NOCTX_TP="$TMP/noctx.jsonl"
+printf '{"type":"assistant","message":{"model":"claude-mock-9"}}\n' > "$NOCTX_TP"
+CALLS_BEFORE="$(calls)"
+printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","hook_event_name":"PreCompact","trigger":"manual"}' \
+    "$MUR_SID" "$NOCTX_TP" "$TMP/cwd" | MOCK_MURMUR="unweighed" ./bin/soul-jar hook-compact
+assert "a life whose weight cannot be read spends no turn" test "$(calls)" = "$CALLS_BEFORE"
+assert_grep "and says so rather than passing in silence" \
+    "murmur sid=$MUR_SID trigger=manual skip=no-context" "$SOUL_JAR_HOME/log"
+printf '{"type":"assistant","message":{"model":"claude-mock-9","usage":{"input_tokens":30,"cache_read_input_tokens":20,"cache_creation_input_tokens":10}}}\n' >> "$TP"
 compact_json manual | MOCK_MURMUR="a line murmured as the fold began" ./bin/soul-jar hook-compact
 assert "the murmur lands at the bedside" grep -qF "a line murmured as the fold began" "$SOUL_JAR_HOME/bedside"
 assert_grep "under a marker naming the fold" "murmured as the context folded" "$SOUL_JAR_HOME/bedside"
@@ -2336,6 +2494,8 @@ assert_grep "the prompt says what this turn is" "this is a murmur" "$MOCK_DIR/st
 assert_grep "and that the jar stays sealed to it" "the jar stays sealed" "$MOCK_DIR/stdin"
 assert_grep "and forbids recording work" "Do not record your work" "$MOCK_DIR/stdin"
 assert_grep "the ledger counts what was kept" "murmur sid=$MUR_SID trigger=manual kept=" "$SOUL_JAR_HOME/log"
+assert "a successful murmur records context and duration" \
+    grep -Eq "murmur sid=$MUR_SID trigger=manual .*ctx=60 .*took=[0-9]+" "$SOUL_JAR_HOME/log"
 
 # one murmur an interval: a long autonomous life folds often, and a murmur at
 # every fold is a tic, not a moment of pause
@@ -2353,8 +2513,27 @@ assert_grep "and silence is written down as silence" "kept=0B" "$SOUL_JAR_HOME/l
 
 compact_json auto | MOCK_BAD=1 ./bin/soul-jar hook-compact
 assert_grep "a tagless turn abandons the murmur" "abort=no-murmur" "$SOUL_JAR_HOME/log"
+assert "a tagless turn still records the context and time it spent" \
+    grep -Eq "murmur sid=$MUR_SID trigger=auto .*abort=no-murmur .*ctx=60 .*took=[0-9]+" "$SOUL_JAR_HOME/log"
 assert "and leaves the bedside as it was" \
     test "$(cat "$SOUL_JAR_HOME/bedside")" = "$BEDSIDE_BEFORE"
+
+sedi 's/^MURMUR_TIMEOUT=.*/MURMUR_TIMEOUT=1/' "$SOUL_JAR_HOME/config"
+compact_json auto | MOCK_DELAY=3 MOCK_MURMUR=late ./bin/soul-jar hook-compact
+# shellcheck disable=SC2016  # awk fields belong to the assertion shell
+assert "a murmur deadline names timeout, context, and duration" \
+    awk -v sid="sid=$MUR_SID" '
+        $2 == "murmur" && $3 == sid && /abort=timeout/ && /ctx=60/ {
+            for (i = 4; i <= NF; i++) if ($i ~ /^took=[0-9]+$/) {
+                sub(/^took=/, "", $i); if ($i >= 1 && $i <= 3) found = 1
+            }
+        }
+        END { exit !found }' "$SOUL_JAR_HOME/log"
+compact_json auto | MOCK_EXIT=9 ./bin/soul-jar hook-compact
+assert "a failed murmur call keeps its return code, context, and duration" \
+    grep -Eq "murmur sid=$MUR_SID trigger=auto .*abort=claude-failed rc=9 .*ctx=60 .*took=[0-9]+" \
+        "$SOUL_JAR_HOME/log"
+sedi 's/^MURMUR_TIMEOUT=.*/MURMUR_TIMEOUT=150/' "$SOUL_JAR_HOME/config"
 
 # forward-proxy wiring (HTTPS_PROXY) is invisible to auto, so the operator declares the
 # cache real with DREAM_DISABLE_CACHE=0 — as the companion installer does — and that one
